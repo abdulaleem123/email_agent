@@ -1,0 +1,24 @@
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.30,<1.0
+sqlalchemy>=2.0.30,<2.1
+pydantic>=2.9,<3.0
+pydantic-settings>=2.5,<3.0
+email-validator>=2.2,<3.0
+celery>=5.4,<6.0
+redis>=5.0,<6.0
+httpx>=0.27,<1.0
+anthropic>=0.42,<1.0
+openai>=1.59,<2.0
+openpyxl>=3.1,<4.0
+python-multipart>=0.0.18
+gunicorn>=23.0,<24.0
+PyJWT>=2.9,<3.0
+dnspython>=2.6,<3.0
+bcrypt>=4.0,<5.0
+pypdf>=5.0,<6.0
+python-docx>=1.1,<2.0
+# NOTE: 'cryptography' (AES-GCM key encryption) is intentionally NOT listed
+# here — it's optional. app/services/keys.py already falls back to plaintext
+# storage if it isn't installed, so leaving it out guarantees this file
+# installs on every machine with zero compiled/binary-wheel risk. To enable
+# encrypted-at-rest API keys, run: pip install "cryptography>=42,<46"

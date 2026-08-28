@@ -1,0 +1,35 @@
+# Optional: run the whole stack with one command:  docker compose up --build
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  api:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    ports: ["8000:8000"]
+    depends_on: [redis]
+    command: gunicorn app.main:app -k uvicorn.workers.UvicornWorker -b 0.0.0.0:8000 --workers 2
+
+  worker:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on: [redis]
+    command: celery -A app.celery_app.celery worker --loglevel=info --concurrency=4
+
+  beat:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on: [redis]
+    command: celery -A app.celery_app.celery beat --loglevel=info
+
+  frontend:
+    build: ./frontend
+    ports: ["5173:5173"]
+    depends_on: [api]
