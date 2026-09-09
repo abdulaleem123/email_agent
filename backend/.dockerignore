@@ -1,0 +1,18 @@
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.pyc
+.env
+.git
+
+# backend/.dockerignore — ye lines add karo
+venv/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.pyc
+.env
+.git
+fix_superadmin.py

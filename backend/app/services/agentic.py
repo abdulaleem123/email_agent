@@ -21,6 +21,7 @@ from .. import models
 from . import keys as keysvc, embeddings
 from .llm import (_persona_for, BASE_RULES, country_style, MEETING_DAYS_RULE,
                   _thread_history)
+from .scenario_detector import detect_scenario, build_scenario_instruction
 
 
 def _tools(agent: models.Agent):
@@ -75,11 +76,17 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
     from openai import OpenAI
     client = OpenAI(api_key=key)
 
+    # Detect prospect's scenario from the last inbound message
+    last_inbound = next(
+        (m.body for m in reversed(lead.messages or []) if m.direction == "in" and not m.is_spam),
+        ""
+    )
+    scenario = detect_scenario(last_inbound)
+    scenario_block = build_scenario_instruction(scenario, agent.name, lead.name or "the prospect")
+
     system = (_persona_for(agent) + "\n\n" + BASE_RULES + "\n\n"
-              "You are handling an INBOUND reply. Answer from the knowledge base "
-              "(use kb_search). Keep it SHORT, clear, human. Do not re-pitch. "
-              "If the prospect is interested in talking, call get_meeting_link and "
-              "share it naturally.\n\n"
+              "You are handling an INBOUND reply. Keep it SHORT, clear, human.\n\n"
+              f"── SCENARIO INTELLIGENCE ──\n{scenario_block}\n\n"
               f"MARKET PSYCHOLOGY:\n{country_style(lead.country)}\n\n"
               + (MEETING_DAYS_RULE if agent.meeting_url else "")
               + "\n\nFinish with a final message. Format: first line 'Subject: ...', "
@@ -126,4 +133,5 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
         first, _, rest = final_text.partition("\n")
         subject = first.split(":", 1)[1].strip()[:200]
         body = rest.strip()
-    return subject, body
+    from .llm import _humanize
+    return _humanize(subject), _humanize(body)

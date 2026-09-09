@@ -64,11 +64,13 @@ a{color:var(--blue)}
 .sidebar-collapsed .collapse-btn{left:65px}
 .collapse-btn:hover{background:var(--blue);color:#fff;transform:scale(1.08)}
 .collapse-btn svg{width:14px;height:14px}
-.nav{flex:1;padding:14px 10px 4px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;overflow-x:hidden}
+.nav{flex:1;padding:14px 10px 4px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;overflow-x:hidden;scrollbar-width:none}
+.nav::-webkit-scrollbar{display:none}
 .nav button{display:flex;align-items:center;gap:12px;color:#4c5876;padding:10px 12px;border-radius:10px;text-align:left;font-weight:500;width:100%;white-space:nowrap}
 .nav button .ico{display:flex;flex:none}
 .nav button:hover{background:#eef3ff;color:var(--blue)}
 .nav button.on{background:var(--blue);color:#fff;box-shadow:0 4px 14px rgba(0,84,252,.22)}
+.sidebar-collapsed .nav button.on{background:var(--blue);color:#fff;border-radius:12px}
 .side-foot{padding:14px 16px;border-top:1px solid var(--line);font-size:12.5px}
 .side-foot .who{color:var(--navy);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:8px}
 .signout-btn{display:flex;align-items:center;gap:10px;color:#8b96b3;width:100%;padding:8px 4px;border-radius:8px;transition:color .16s ease,background .16s ease}
@@ -312,13 +314,15 @@ tbody tr{animation:fadeIn .3s ease both}
 .avatar-fallback{width:34px;height:34px;border-radius:50%;background:var(--navy);color:#fff;display:grid;place-items:center;font-weight:700;font-size:13px;flex:none;font-family:var(--font-d)}
 .avatar-fallback.lg{width:46px;height:46px;font-size:17px}
 .ellipsis{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;max-width:180px}
-.pitch-panel{min-height:0;max-height:82vh;padding:22px;display:flex;flex-direction:column;overflow:hidden}
-/* Transcript scrolls INSIDE a short, fixed box instead of stretching the page.
-   The header, summary and Ask box stay put; only the conversation scrolls. */
-.pitch-panel .thread{max-height:46vh;overflow-y:auto;padding-right:6px;margin-right:-2px}
+.pitch-panel{min-height:0;max-height:82vh;padding:0;display:flex;flex-direction:column;overflow:hidden}
+.pitch-panel .pitch-header{padding:18px 22px 10px;flex:none}
+.pitch-panel-body{flex:1;min-height:0;overflow-y:auto;padding:0 22px 22px;scroll-behavior:smooth}
+.pitch-panel-body::-webkit-scrollbar{width:8px}
+.pitch-panel-body::-webkit-scrollbar-thumb{background:#d3dbe8;border-radius:8px}
+.pitch-panel .thread{max-height:min(52vh, 520px);overflow-y:auto;padding-right:6px;margin-right:-2px;margin-bottom:8px}
 .pitch-panel .thread::-webkit-scrollbar{width:8px}
 .pitch-panel .thread::-webkit-scrollbar-thumb{background:#d3dbe8;border-radius:8px}
-.pitch-header{display:flex;align-items:center;gap:14px;margin-bottom:10px}
+.pitch-header{display:flex;align-items:center;gap:14px;margin-bottom:0}
 .pitch-header h3{font-size:17px;color:var(--navy);font-family:var(--font-d)}
 .pitch-summary{background:#f4f8ff;border:1px solid #e1eaff;border-radius:10px;padding:12px 14px;margin-bottom:16px}
 .pitch-skeleton{padding:4px 0}

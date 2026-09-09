@@ -67,53 +67,6 @@ def openai_key(db: Session) -> str:
     return get_key(db, "openai_api_key", settings.OPENAI_API_KEY)
 
 
-def tavily_key(db: Session) -> str:
-    return get_key(db, "tavily_api_key", settings.TAVILY_API_KEY)
-
-
-DEFAULT_TAVILY_QUOTA = 1000
-
-
-def get_tavily_quota(db: Session) -> int:
-    row = db.get(models.SettingKV, "tavily_quota")
-    try:
-        return int(row.value) if row and row.value else DEFAULT_TAVILY_QUOTA
-    except (TypeError, ValueError):
-        return DEFAULT_TAVILY_QUOTA
-
-
-def set_tavily_quota(db: Session, quota: int):
-    row = db.get(models.SettingKV, "tavily_quota")
-    if row:
-        row.value = str(max(0, int(quota)))
-    else:
-        db.add(models.SettingKV(key="tavily_quota", value=str(max(0, int(quota)))))
-    db.commit()
-
-
-def tavily_credits(db: Session) -> dict:
-    """Deterministic 'used / quota' credits, e.g. 347 / 1000. Tavily has no
-    stable public usage API to poll, so this counts every search WE recorded
-    (every real Tavily call goes through keysvc.record) against a quota you
-    set in Super Admin (default 1000 — matches your plan's monthly credits).
-    Reset the counter each billing cycle by raising the quota or clearing
-    ApiUsage rows for provider='tavily'.
-
-    Returns {ok, quota, used, remaining, exhausted}. exhausted=True is the
-    single source of truth outbound checks against — when true, ALL active
-    campaigns are paused (see tasks.py: check_tavily_quota)."""
-    from sqlalchemy import func
-    key = tavily_key(db)
-    quota = get_tavily_quota(db)
-    used = (db.query(func.count(models.ApiUsage.id))
-            .filter(models.ApiUsage.provider == "tavily").scalar() or 0)
-    remaining = max(0, quota - used)
-    return {
-        "ok": bool(key), "quota": quota, "used": used, "remaining": remaining,
-        "exhausted": (not key) or remaining <= 0,
-        "detail": "No Tavily key set" if not key else "",
-    }
-
 
 def cost_of(model: str, in_tok: int, out_tok: int) -> float:
     pin, pout = PRICES.get(model, (0.0, 0.0))
@@ -134,9 +87,7 @@ def record(db: Session, provider: str, kind: str, model: str = "",
     # automatically whenever usage drops back under a threshold (quota raised
     # or ApiUsage cleared for the new billing cycle).
     try:
-        if provider == "tavily":
-            _maybe_notify_tavily(db, agent_id)
-        elif provider == "openai":
+        if provider == "openai":
             _maybe_notify_openai(db, agent_id)
     except Exception:
         pass   # notifications must never break a real API call
@@ -162,33 +113,6 @@ def _push_notification(db: Session, kind: str, title: str, body: str = "",
                                agent_id=agent_id))
     db.commit()
 
-
-def _maybe_notify_tavily(db: Session, agent_id: int | None):
-    c = tavily_credits(db)
-    quota, used, remaining = c["quota"], c["used"], c["remaining"]
-    if quota <= 0:
-        return
-    pct_used = used / quota
-    # 100% — exhausted
-    if remaining <= 0:
-        if not _flag(db, "tavily_warned_100"):
-            _push_notification(db, "warn", "Tavily credits finished",
-                               f"{used}/{quota} used. Outbound will auto-pause. "
-                               "Raise the quota or add a new key in Super Admin → API Keys.",
-                               agent_id)
-            _set_flag(db, "tavily_warned_100", True)
-        return
-    _set_flag(db, "tavily_warned_100", False)
-    # 90% — low warning
-    if pct_used >= 0.90:
-        if not _flag(db, "tavily_warned_90"):
-            _push_notification(db, "warn", "Tavily credits running low",
-                               f"{remaining} of {quota} credits left "
-                               f"({round(pct_used*100)}% used). Top up soon to avoid a pause.",
-                               agent_id)
-            _set_flag(db, "tavily_warned_90", True)
-    else:
-        _set_flag(db, "tavily_warned_90", False)
 
 
 def _maybe_notify_openai(db: Session, agent_id: int | None):

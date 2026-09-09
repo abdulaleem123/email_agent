@@ -102,6 +102,38 @@ class AskIn(BaseModel):
     question: str
 
 
+class PickupIn(BaseModel):
+    notes: str  # agent's plain-English description of what actually happened on the call
+
+
+@router.post("/pickup", response_model=schemas.PitchOut)
+def generate_from_pickup(lead_id: int = Query(...), agent_id: int | None = Query(default=None),
+                         data: PickupIn = ..., db: Session = Depends(get_db)):
+    """Generate a transcript based on what ACTUALLY happened when the client picked up.
+
+    The agent writes a few plain sentences (mood, what they said, objections, outcome).
+    The LLM writes a transcript that matches those notes exactly — no invented happy endings.
+    Stored as a PitchRecord so the team can see it in Pitch Decker."""
+    lead = db.get(models.Lead, lead_id)
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+    if not data.notes or not data.notes.strip():
+        raise HTTPException(400, "Notes cannot be empty")
+    agent = db.get(models.Agent, agent_id) if agent_id else _default_sales_agent(db)
+    if not agent:
+        raise HTTPException(400, "No agent available")
+    from ..services import keys as keysvc
+    if settings.LLM_PROVIDER.lower() == "openai" and not keysvc.openai_key(db):
+        raise HTTPException(400, "No OpenAI key — add it in Super Admin → API Keys")
+    summary, transcript = pitch_service.generate_pickup_transcript(db, lead, agent, data.notes.strip())
+    rec = models.PitchRecord(
+        lead_id=lead.id, agent_id=agent.id, lead_name=lead.name,
+        company=lead.company, phone=lead.phone, country=lead.country,
+        summary=f"[CALL LOG] {summary}", transcript=transcript)
+    db.add(rec); db.commit(); db.refresh(rec)
+    return rec
+
+
 @router.post("/ask")
 def ask(lead_id: int = Query(...), agent_id: int | None = Query(default=None),
         data: AskIn = ..., db: Session = Depends(get_db)):

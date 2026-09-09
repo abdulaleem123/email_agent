@@ -35,9 +35,8 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     LLM_MODEL: str = "claude-sonnet-4-6"
 
-    # --- Tavily (advanced company + pain-point research) ---
+    # Legacy fields kept so old .env files don't crash the app
     TAVILY_API_KEY: str = ""
-    # (email verification is free-only: MX + SMTP probe, see mailer.py)
     TAVILY_DEPTH: str = "advanced"
 
     # --- Embeddings (per-agent knowledge base, pgvector on Postgres) ---
@@ -82,6 +81,8 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"    
 
 
 settings = Settings()
+

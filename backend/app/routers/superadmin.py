@@ -1,9 +1,10 @@
 """Super Admin area — AI USAGE + API KEYS only, nothing else.
 
-- Real-time OpenAI + Tavily usage: input/output tokens, cost (USD), per agent,
+- Real-time OpenAI usage: input/output tokens, cost (USD), per agent,
   per model, per kind (chat / embedding / moderation / search), with time windows.
 - API keys managed live (stored in SettingKV, .env as fallback): view (masked),
   update, delete, and TEST — no server restart needed.
+- Web research uses DuckDuckGo (free, no key needed).
 """
 from datetime import datetime, timedelta
 
@@ -48,7 +49,6 @@ def usage(window: str = "30d", db: Session = Depends(get_db)):
         }
 
     openai_rows = [r for r in rows if r.provider == "openai"]
-    tavily_rows = [r for r in rows if r.provider == "tavily"]
 
     # per model
     models_map = {}
@@ -74,8 +74,6 @@ def usage(window: str = "30d", db: Session = Depends(get_db)):
     return {
         "window": window,
         "openai": {**agg(openai_rows)},
-        "tavily": {"searches": len(tavily_rows),
-                   "cost_usd": round(sum(r.cost_usd for r in tavily_rows), 4)},
         "total_cost_usd": round(sum(r.cost_usd for r in rows), 4),
         "per_model": per_model,
         "per_agent": per_agent,
@@ -98,32 +96,9 @@ def usage_timeseries(days: int = 15, db: Session = Depends(get_db)):
     return sorted(out, key=lambda x: x["date"])
 
 
-# --------------------------------------------------------------- tavily credits
-@router.get("/tavily-credits")
-def tavily_credits(db: Session = Depends(get_db)):
-    """Tavily usage as 'used / quota' (default 1000). Drives the outbound
-    auto-pause: when exhausted, ALL active campaigns pause immediately;
-    inbound replies keep working (they never use Tavily)."""
-    return keysvc.tavily_credits(db)
-
-
-class QuotaIn(BaseModel):
-    quota: int
-
-
-@router.put("/tavily-quota")
-def set_tavily_quota(data: QuotaIn, request: Request, db: Session = Depends(get_db),
-                     user: models.User = Depends(current_superadmin)):
-    keysvc.set_tavily_quota(db, data.quota)
-    audit.log(db, user, "tavily_quota.set", "settings", "tavily_quota",
-             f"quota={data.quota}", request.client.host if request.client else "")
-    return keysvc.tavily_credits(db)
-
-
 # --------------------------------------------------------------- API keys
 KEY_DEFS = {
     "openai_api_key": ("OpenAI", settings.OPENAI_API_KEY),
-    "tavily_api_key": ("Tavily", settings.TAVILY_API_KEY),
 }
 
 
@@ -203,23 +178,6 @@ def test_key(name: str, db: Session = Depends(get_db)):
             return {"ok": False, "detail": f"OpenAI rejected the key ({r.status_code})"}
         except Exception as e:
             return {"ok": False, "detail": f"Could not reach OpenAI: {e}"}
-    if name == "tavily_api_key":
-        key = keysvc.tavily_key(db)
-        if not key:
-            return {"ok": False, "detail": "No Tavily key set"}
-        try:
-            r = httpx.post("https://api.tavily.com/search",
-                           json={"api_key": key, "query": "ping", "max_results": 1},
-                           timeout=20)
-            # This test call uses a REAL Tavily credit on their side — record
-            # it here too, or our internal counter silently under-reports
-            # vs. what Tavily's own dashboard shows.
-            keysvc.record(db, "tavily", "search", "tavily-key-test")
-            if r.status_code == 200:
-                return {"ok": True, "detail": "Tavily key valid"}
-            return {"ok": False, "detail": f"Tavily rejected the key ({r.status_code})"}
-        except Exception as e:
-            return {"ok": False, "detail": f"Could not reach Tavily: {e}"}
     return {"ok": False, "detail": "unknown key"}
 
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from '../api.js'
 import MiniOrb from '../MiniOrb.jsx'
-import { Toast, useToast } from '../App.jsx'
+import { Toast, useToast, useOpenAIKey } from '../App.jsx'
 import { IconSend, IconPause, IconRefresh, IconMail } from '../Icons.jsx'
 
 /**
@@ -10,9 +10,15 @@ import { IconSend, IconPause, IconRefresh, IconMail } from '../Icons.jsx'
  * per-agent play/pause with immediate effect.
  */
 export default function Inbox() {
+  const { openaiReady } = useOpenAIKey()
+  const aiDisabled = openaiReady === false
   const [agents, setAgents] = useState([])
   const [agentId, setAgentId] = useState(0)
   const [convos, setConvos] = useState([])
+  const [convoPage, setConvoPage] = useState(1)
+  const [convoTotal, setConvoTotal] = useState(0)
+  const [convoPages, setConvoPages] = useState(1)
+  const [convoQ, setConvoQ] = useState('')
   const [open, setOpen] = useState(null)
   const [thread, setThread] = useState(null)
   const [threadPage, setThreadPage] = useState(1)
@@ -26,13 +32,18 @@ export default function Inbox() {
   useEffect(() => { api.agents().then(setAgents).catch(() => {}) }, [])
 
   const loadConvos = useCallback(() => {
-    // /api/inbox returns a paginated object {items, total, pages, ...} — take
-    // the items array. Guard against any shape so the page can never crash on
-    // convos.map again.
-    api.inbox(agentId || undefined)
-      .then(r => setConvos(Array.isArray(r) ? r : (r?.items || [])))
+    const params = new URLSearchParams({ page: convoPage, per_page: 20 })
+    if (agentId) params.set('agent_id', agentId)
+    if (convoQ.trim()) params.set('q', convoQ.trim())
+    api.inboxPaged(params.toString())
+      .then(r => {
+        const d = Array.isArray(r) ? { items: r, total: r.length, pages: 1 } : r
+        setConvos(d.items || [])
+        setConvoTotal(d.total || 0)
+        setConvoPages(d.pages || 1)
+      })
       .catch(() => setConvos([]))
-  }, [agentId])
+  }, [agentId, convoPage, convoQ])
 
   useEffect(() => { loadConvos() }, [loadConvos])
 
@@ -85,6 +96,12 @@ export default function Inbox() {
     } catch (e) { show(e.message, true) } finally { setSending(false) }
   }
 
+  const deleteConvo = async (leadId) => {
+    if (!confirm('Remove this conversation? The lead will be deleted.')) return
+    try { await api.deleteLead(leadId); if (open?.lead_id === leadId) setOpen(null); loadConvos(); show('Removed') }
+    catch (e) { show(e.message, true) }
+  }
+
   const toggleAgent = async (a) => {
     const r = await api.toggleAgent(a.id)
     setAgents(list => list.map(x => x.id === a.id ? { ...x, is_active: r.is_active } : x))
@@ -111,8 +128,10 @@ export default function Inbox() {
         <div style={{ flex: 1 }}>
           <b>Every conversation, every direction, in one place</b>
           <p className="sm mut mt">
-            AI agents reply ~15 min after each inbound. Pause an agent to take over, send manually,
-            or resume anytime. Long threads paginate so nothing freezes.
+            <b>AI Live</b> means the agent is active and will auto-reply to inbound emails (after the
+            configured inbound delay) and send scheduled outbound emails. Pausing stops <em>both</em> inbound
+            auto-replies and outbound sends for that agent. Inbound/outbound timing is set on the
+            Settings page in real-time — no restart needed. You can also pause AI per-conversation below.
           </p>
         </div>
         <button className={`icon-btn ${live ? 'on' : ''}`} onClick={() => setLive(l => !l)}
@@ -147,12 +166,19 @@ export default function Inbox() {
         </div>
       )}
 
+      <div className="row between mb" style={{ gap: 8 }}>
+        <input style={{ flex: 1, padding: '8px 12px', borderRadius: 8, border: '1px solid var(--line)', fontSize: 13 }}
+               placeholder="Search conversations…" value={convoQ}
+               onChange={e => { setConvoQ(e.target.value); setConvoPage(1) }} />
+        <span className="sm mut">{convoTotal} total</span>
+      </div>
+
       <div className="card" style={{ padding: 0 }}>
         {(!Array.isArray(convos) || convos.length === 0) && <div className="empty">No conversations yet.</div>}
         {(Array.isArray(convos) ? convos : []).map(c => (
-          <div key={c.lead_id} className={`convo ${open?.lead_id === c.lead_id ? 'on' : ''}`} onClick={() => openConvo(c)}>
-            <div className="avatar-fallback">{(c.name || c.email || '?')[0].toUpperCase()}</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div key={c.lead_id} className={`convo ${open?.lead_id === c.lead_id ? 'on' : ''}`}>
+            <div className="avatar-fallback" onClick={() => openConvo(c)} style={{ cursor: 'pointer' }}>{(c.name || c.email || '?')[0].toUpperCase()}</div>
+            <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => openConvo(c)}>
               <div className="row between">
                 <b className="ellipsis">{c.name || c.email}</b>
                 <span className="sm mut">{c.last_at ? new Date(c.last_at + 'Z').toLocaleString() : ''}</span>
@@ -166,13 +192,23 @@ export default function Inbox() {
                 <b>{c.last_subject}</b> — {c.last_snippet}
               </div>
             </div>
-            <div style={{ textAlign: 'right' }}>
+            <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
               <span className={`pill ${c.temperature}`}>{c.temperature}</span>
               <div className="sm mut">{c.message_count} msgs</div>
+              <button className="btn danger small" style={{ padding: '2px 6px', fontSize: 11 }}
+                      onClick={e => { e.stopPropagation(); deleteConvo(c.lead_id) }} title="Remove conversation">✕</button>
             </div>
           </div>
         ))}
       </div>
+
+      {convoPages > 1 && (
+        <div className="pagination mt">
+          <button disabled={convoPage <= 1} onClick={() => setConvoPage(p => p - 1)}>‹</button>
+          <span className="sm mut">Page {convoPage} of {convoPages}</span>
+          <button disabled={convoPage >= convoPages} onClick={() => setConvoPage(p => p + 1)}>›</button>
+        </div>
+      )}
 
       {open && thread && (
         <div className="drawer-veil" onClick={e => e.target === e.currentTarget && setOpen(null)}>
@@ -239,8 +275,9 @@ export default function Inbox() {
                 <label>Message (plain text)</label>
                 <textarea rows={4} value={body} onChange={e => setBody(e.target.value)} placeholder="Write your reply…" />
               </div>
-              <button className="btn" onClick={send} disabled={sending || !body.trim() || !subject.trim()}>
-                {sending ? <span className="spinner" /> : <IconSend />} &nbsp;{sending ? 'Sending…' : 'Send now'}
+              <button className="btn" onClick={send} disabled={sending || !body.trim() || !subject.trim() || aiDisabled}
+                title={aiDisabled ? 'OpenAI API key required — configure in Super Admin' : undefined}>
+                {aiDisabled ? '🔑 Key required' : (sending ? <><span className="spinner" /> &nbsp;Sending…</> : <><IconSend /> &nbsp;Send now</>)}
               </button>
             </div>
           </div>

@@ -67,7 +67,8 @@ def stats(window: str = Query(default="30d"), db: Session = Depends(get_db)):
 @router.get("/timeseries")
 def timeseries(days: int = Query(default=15, ge=1, le=90),
                db: Session = Depends(get_db)):
-    """Daily sent/received for the chart."""
+    """Daily sent/received for the chart. Always returns all N days (zeros
+    for days with no activity) so the chart renders even on a fresh install."""
     since = datetime.utcnow() - timedelta(days=days)
     rows = (db.query(func.date(models.EmailMessage.created_at),
                      models.EmailMessage.direction,
@@ -77,6 +78,10 @@ def timeseries(days: int = Query(default=15, ge=1, le=90),
             .group_by(func.date(models.EmailMessage.created_at),
                       models.EmailMessage.direction).all())
     series = {}
+    # Pre-seed every day in the window with zeros so chart axes always show
+    for i in range(days):
+        day = str((datetime.utcnow() - timedelta(days=days - 1 - i)).date())
+        series[day] = {"date": day, "sent": 0, "received": 0}
     for d, direction, n in rows:
         day = str(d)
         series.setdefault(day, {"date": day, "sent": 0, "received": 0})
@@ -109,3 +114,84 @@ def mark_read(db: Session = Depends(get_db)):
       .update({models.Notification.read: True})
     db.commit()
     return {"ok": True}
+
+
+@router.get("/monitoring")
+def monitoring(page: int = Query(1, ge=1), per_page: int = Query(20, ge=5, le=100),
+               db: Session = Depends(get_db)):
+    """Real-time system monitoring: outbound sent, inbound received, paused
+    agents, bounced/failed. Paginated so it never OOMs under high volume."""
+    now = datetime.utcnow()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    hour_ago = now - timedelta(hours=1)
+
+    agents = db.query(models.Agent).order_by(models.Agent.id).all()
+    agent_rows = []
+    for a in agents:
+        sent_today = (db.query(func.count(models.EmailMessage.id))
+                      .filter(models.EmailMessage.agent_id == a.id,
+                              models.EmailMessage.direction == "out",
+                              models.EmailMessage.created_at >= today,
+                              models.EmailMessage.is_spam.is_(False)).scalar() or 0)
+        recv_today = (db.query(func.count(models.EmailMessage.id))
+                      .filter(models.EmailMessage.agent_id == a.id,
+                              models.EmailMessage.direction == "in",
+                              models.EmailMessage.created_at >= today,
+                              models.EmailMessage.is_spam.is_(False)).scalar() or 0)
+        sent_1h = (db.query(func.count(models.EmailMessage.id))
+                   .filter(models.EmailMessage.agent_id == a.id,
+                           models.EmailMessage.direction == "out",
+                           models.EmailMessage.created_at >= hour_ago,
+                           models.EmailMessage.is_spam.is_(False)).scalar() or 0)
+        agent_rows.append({
+            "agent_id": a.id, "name": a.name, "role": a.role or "",
+            "is_active": a.is_active,
+            "sent_today": sent_today, "recv_today": recv_today, "sent_last_1h": sent_1h,
+            "daily_limit": a.daily_send_limit or 150,
+        })
+
+    # Recent outbound (paginated)
+    out_q = (db.query(models.EmailMessage)
+               .filter(models.EmailMessage.direction == "out",
+                       models.EmailMessage.is_spam.is_(False))
+               .order_by(models.EmailMessage.created_at.desc()))
+    out_total = out_q.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
+    out_rows = out_q.offset((page - 1) * per_page).limit(per_page).all()
+
+    # Recent inbound (paginated)
+    in_q = (db.query(models.EmailMessage)
+              .filter(models.EmailMessage.direction == "in",
+                      models.EmailMessage.is_spam.is_(False))
+              .order_by(models.EmailMessage.created_at.desc()))
+    in_total = in_q.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
+    in_rows = in_q.offset((page - 1) * per_page).limit(per_page).all()
+
+    # Bounces / failed
+    bounce_q = (db.query(models.EmailMessage)
+                  .filter(models.EmailMessage.is_spam.is_(True),
+                          models.EmailMessage.spam_reason.ilike("%bounce%"))
+                  .order_by(models.EmailMessage.created_at.desc()))
+    bounce_total = bounce_q.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
+    bounce_rows = bounce_q.limit(per_page).all()
+
+    lead_ids = {r.lead_id for r in out_rows + in_rows + bounce_rows if r.lead_id}
+    leads_map = {l.id: l for l in db.query(models.Lead).filter(models.Lead.id.in_(lead_ids)).all()} if lead_ids else {}
+
+    def _ser(r):
+        lead = leads_map.get(r.lead_id)
+        return {"id": r.id, "direction": r.direction,
+                "subject": (r.subject or "")[:120],
+                "from_addr": r.from_addr or "",
+                "lead_email": lead.email if lead else "",
+                "created_at": r.created_at.isoformat() if r.created_at else ""}
+
+    return {
+        "page": page, "per_page": per_page,
+        "agents": agent_rows,
+        "outbound": {"total": out_total, "items": [_ser(r) for r in out_rows],
+                     "pages": max(1, (out_total + per_page - 1) // per_page)},
+        "inbound": {"total": in_total, "items": [_ser(r) for r in in_rows],
+                    "pages": max(1, (in_total + per_page - 1) // per_page)},
+        "bounced": {"total": bounce_total, "items": [_ser(r) for r in bounce_rows]},
+        "paused_agents": [a["name"] for a in agent_rows if not a["is_active"]],
+    }

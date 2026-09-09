@@ -3,6 +3,9 @@
 Both are Redis-backed (already running for Celery) so limits are shared
 correctly across multiple uvicorn workers, not per-process in-memory counters
 that silently reset/miss under load.
+
+Redis connection is lazy (created on first use) so the app starts cleanly
+even if Redis hasn't finished booting yet.
 """
 import secrets
 import time
@@ -15,7 +18,18 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from .config import settings
 from . import security
 
-_redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
+# Lazy Redis client — created on first use, not at import time.
+# This prevents a crash-on-startup when Redis is still booting
+# (common in docker-compose where the app container may start before redis is ready).
+_redis_client = None
+
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis_client
+
 
 CSRF_COOKIE = "cv_csrf"
 CSRF_HEADER = "X-CSRF-Token"
@@ -48,11 +62,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             ip = _client_ip(request)
             key = f"rl:{prefix}:{ip}"
             try:
-                current = _redis.incr(key)
+                r = _get_redis()
+                current = r.incr(key)
                 if current == 1:
-                    _redis.expire(key, window)
+                    r.expire(key, window)
                 if current > max_n:
-                    ttl = _redis.ttl(key)
+                    ttl = r.ttl(key)
                     return JSONResponse(
                         status_code=429,
                         content={"detail": f"Too many requests — try again in {max(ttl, 1)}s"},
@@ -79,7 +94,12 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             return await call_next(request)   # login/logout/verify-otp: no session yet to protect
 
         session_cookie = request.cookies.get(security.COOKIE_NAME)
-        if session_cookie:   # only enforce CSRF for cookie-authenticated requests;
+        
+        # Check if request is using Bearer token
+        auth_header = request.headers.get("Authorization", "")
+        bearer = auth_header.startswith("Bearer ")
+
+        if session_cookie and not bearer:   # only enforce CSRF for cookie-authenticated requests;
                               # pure Bearer-token API clients are immune to browser CSRF by nature
             csrf_cookie = request.cookies.get(CSRF_COOKIE)
             csrf_header = request.headers.get(CSRF_HEADER)

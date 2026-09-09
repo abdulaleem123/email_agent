@@ -262,7 +262,7 @@ def auto_reply(self, lead_id: int):
 
 @celery.task(name="app.tasks.start_campaign_lead", bind=True, max_retries=2, default_retry_delay=120)
 def start_campaign_lead(self, lead_id: int):
-    """Initial outreach: MX verify -> same-day dedupe -> Tavily advanced
+    """Initial outreach: MX verify -> same-day dedupe -> DuckDuckGo advanced
     research -> persona email (template mode = HTML + Chatversio logo bottom,
     first touch only) -> send."""
     db = SessionLocal()
@@ -276,23 +276,6 @@ def start_campaign_lead(self, lead_id: int):
         campaign = db.get(models.Campaign, lead.campaign_id) if lead.campaign_id else None
         if not agent or not agent.is_active or (campaign and campaign.status != "active"):
             return "paused"
-
-        # DUPLICATE GUARD: never send a second INITIAL outreach to a lead that
-        # already got one (any campaign/agent). We surface it as a duplicate
-        # (audit row + notification) instead of re-sending. Checked BEFORE any
-        # Tavily/LLM spend so a duplicate costs zero credits.
-        from .services import outbound as outbound_guard
-        if outbound_guard.is_duplicate_initial(db, lead):
-            outbound_guard.mark_duplicate(db, lead, agent.id)
-            _batch_progress(db, lead, ok=False)
-            return "duplicate-initial-blocked"
-
-        # Tavily is preferred for outbound research, but it's no longer REQUIRED:
-        # if the key is missing or credits are finished, tavily._search() falls
-        # back to DuckDuckGo automatically, so outbound keeps running instead of
-        # pausing. The 90%/100% credit notifications still fire from keys.record().
-        from .services import keys as keysvc  # noqa: F401  (kept for downstream use)
-
 
         # SAME-DAY DEDUPE across agents
         clash = _lead_emailed_today_by_other_agent(db, lead, agent.id)
@@ -318,7 +301,7 @@ def start_campaign_lead(self, lead_id: int):
             _batch_progress(db, lead, ok=False)
             return "unverified-garbage"
 
-        # Tavily advanced research (company + person + website + country)
+        # DuckDuckGo research (company + person + website + country)
         if not lead.company_research and (lead.company or lead.website):
             research, pains = tavily.research_lead(
                 lead.company, lead.name, lead.website, lead.country,
@@ -376,14 +359,12 @@ def followup_sweep():
     db = SessionLocal()
     scheduled = 0
     try:
-        cutoff = datetime.utcnow() - timedelta(hours=settings.FOLLOWUP_AFTER_HOURS)
         leads = (db.query(models.Lead)
-                 .filter(models.Lead.status == models.LeadStatus.contacted,
-                         models.Lead.last_outbound_at.isnot(None),
-                         models.Lead.last_outbound_at < cutoff,
-                         models.Lead.followups_sent < settings.MAX_FOLLOWUPS,
-                         models.Lead.agent_id.isnot(None))
-                 .all())
+         .filter(models.Lead.status == models.LeadStatus.contacted,
+                 models.Lead.last_outbound_at.isnot(None),
+                 models.Lead.followups_sent < settings.MAX_FOLLOWUPS,
+                 models.Lead.agent_id.isnot(None))
+         .all())
         for lead in leads:
             if lead.last_inbound_at and lead.last_inbound_at > lead.last_outbound_at:
                 continue
@@ -391,6 +372,11 @@ def followup_sweep():
             campaign = db.get(models.Campaign, lead.campaign_id) if lead.campaign_id else None
             if not agent or not agent.is_active or (campaign and campaign.status != "active"):
                 continue
+            # Per-agent timing: use agent.followup_after_hours if set, else global setting
+            agent_hours = getattr(agent, "followup_after_hours", None) or settings.FOLLOWUP_AFTER_HOURS
+            cutoff = datetime.utcnow() - timedelta(hours=agent_hours)
+            if lead.last_outbound_at >= cutoff:
+                continue  # not yet time for this agent's followup
             lead.followups_sent += 1
             lead.last_outbound_at = datetime.utcnow()
             db.commit()
@@ -423,9 +409,12 @@ def send_followup(self, lead_id: int):
             send_followup.apply_async(args=[lead_id], countdown=3600)
             return "daily-limit-requeued"
         campaign = db.get(models.Campaign, lead.campaign_id) if lead.campaign_id else None
+        # Pass which follow-up number this is so the LLM applies the correct
+        # tone from BASE_RULES (natural / direct / final-close)
+        followup_goal = f"FOLLOWUP_NUMBER={lead.followups_sent} — see BASE_RULES for exact tone."
         subject, body, _ = llm_service.generate_email(
             db, lead, agent, purpose="followup",
-            campaign_goal=campaign.goal if campaign else "",
+            campaign_goal=followup_goal,
             strategy=campaign.strategy if campaign else "B2B",
             use_template=False, campaign=campaign)
         last_out = next((m for m in reversed(lead.messages) if m.direction == "out"), None)
@@ -444,6 +433,19 @@ def send_followup(self, lead_id: int):
         db.add(models.EmailMessage(lead_id=lead.id, agent_id=agent.id,
                                    direction="out", sent_by="agent",
                                    subject=subject, body=body, message_id=msg_id))
+        # After the final follow-up (3rd), mark lead as closed — never contact again
+        max_fu = settings.MAX_FOLLOWUPS
+        if lead.followups_sent >= max_fu:
+            lead.status = models.LeadStatus.closed
+            db.add(models.EmailMessage(
+                lead_id=lead.id, agent_id=agent.id, direction="out",
+                subject="(sequence closed — no reply after 3 outbounds)",
+                body=f"Lead closed automatically after {max_fu} follow-up(s) with no reply.",
+                sent_by="system"))
+            _notify(db, "info",
+                    f"Lead {lead.email} closed",
+                    f"No reply after {max_fu} follow-ups. Marked as closed — will not be contacted again.",
+                    agent_id=agent.id)
         db.commit()
         return "sent"
     except Exception as exc:
@@ -468,37 +470,6 @@ def purge_garbage():
     finally:
         db.close()
 
-
-@celery.task(name="app.tasks.check_tavily_quota")
-def check_tavily_quota():
-    """Proactive global guard (runs every few minutes via beat): the moment
-    Tavily is missing/exhausted, pause EVERY active campaign in one shot —
-    outbound stops completely, immediately, not lead-by-lead. Inbound is
-    untouched (it never uses Tavily). Also auto-clears the pause note once
-    credits are restored (key re-added or quota raised) — it does NOT
-    reactivate campaigns automatically (that's a deliberate human action),
-    it only stops nagging with a duplicate warning."""
-    db = SessionLocal()
-    try:
-        from .services import keys as keysvc
-        credits = keysvc.tavily_credits(db)
-        active = (db.query(models.Campaign)
-                  .filter(models.Campaign.status == "active").all())
-        if credits["exhausted"] and active:
-            names = [c.name for c in active]
-            for c in active:
-                c.status = "paused"
-            db.commit()
-            reason = credits["detail"] or f"quota used up ({credits['used']}/{credits['quota']})"
-            _notify(db, "warn",
-                    f"ALL outbound paused — Tavily unavailable ({reason})",
-                    "Campaigns paused: " + ", ".join(names) +
-                    ". Inbound replies keep working. Fix in Super Admin → API Keys, "
-                    "then resume each campaign manually.")
-            return f"paused {len(active)} campaign(s)"
-        return "ok"
-    finally:
-        db.close()
 
 
 @celery.task(name="app.tasks.daily_backup")

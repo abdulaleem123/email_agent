@@ -16,13 +16,24 @@ export default function Garbage() {
   const toggleOne = (id) => setSel(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
 
   const bulkDelete = async () => {
-    const r = await api.bulkDeleteGarbage([...sel])
-    show(`Deleted ${r.deleted} items`); load()
+    if (!sel.size) return
+    try {
+      const r = await api.bulkDeleteGarbage([...sel])
+      show(`Deleted ${r.deleted} items`); setSel(new Set()); load()
+    } catch (e) { show(e.message, true) }
+  }
+  const deleteOne = async (id) => {
+    try {
+      await api.deleteGarbage(id)
+      show('Deleted'); load()
+    } catch (e) { show(e.message, true) }
   }
   const clearAll = async () => {
     if (!confirm(`Permanently delete all ${data.total} garbage items?`)) return
-    const r = await api.clearGarbage()
-    show(`Cleared ${r.deleted} items`); setPage(1); load()
+    try {
+      const r = await api.clearGarbage()
+      show(`Cleared ${r.deleted} items`); setPage(1); load()
+    } catch (e) { show(e.message, true) }
   }
 
   const pagesArr = Array.from({ length: data.pages }, (_, i) => i + 1)
@@ -53,7 +64,7 @@ export default function Garbage() {
                 <td className="sm" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.subject}</td>
                 <td><span className="pill gray">{m.spam_reason || 'spam'}</span></td>
                 <td className="sm mut">{new Date(m.created_at + 'Z').toLocaleString()}</td>
-                <td><button className="btn danger small" onClick={async () => { await api.deleteGarbage(m.id); load() }}>✕</button></td>
+                <td><button className="btn danger small" onClick={() => deleteOne(m.id)}>✕</button></td>
               </tr>
             ))}
             {data.items.length === 0 && <tr><td colSpan={6}><div className="empty">Garbage is empty — spam and unverified emails land here</div></td></tr>}

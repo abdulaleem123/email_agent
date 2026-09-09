@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useState, useCallback, useRef, createContext, useContext } from 'react'
 import { api, getToken, logout } from './api.js'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import {
@@ -59,6 +59,14 @@ export function useToast() {
   }, [])
   return [toast, show]
 }
+
+// ─── OpenAI Key Context ────────────────────────────────────────────────────────
+// Provides { openaiReady: bool | null } to the whole app.
+// null  = still loading (unknown)
+// false = key missing → AI ops must be disabled
+// true  = key present  → AI ops enabled
+export const OpenAIKeyContext = createContext({ openaiReady: null })
+export function useOpenAIKey() { return useContext(OpenAIKeyContext) }
 
 function NotifBell({ onNavigate }) {
   const [open, setOpen] = useState(false)
@@ -232,29 +240,33 @@ function UserPill({ me, onNavigate, onSignOut }) {
   )
 }
 
-function KeyStatusBanner() {
-  const [state, setState] = useState(null)
+function KeyStatusBanner({ children }) {
+  const [openaiReady, setOpenaiReady] = useState(null) // null=loading, false=missing, true=ok
+
   useEffect(() => {
     let alive = true
     const check = () => api.saKeys()
       .then(ks => {
         if (!alive) return
-        const openai = ks.find(k => k.name === 'openai_api_key')?.configured
-        const tavily = ks.find(k => k.name === 'tavily_api_key')?.configured
-        setState({ openai, tavily })
+        const configured = ks.find(k => k.name === 'openai_api_key')?.configured
+        setOpenaiReady(configured === true)
       })
-      .catch(() => setState(null))
-    check(); const t = setInterval(check, 30000)
+      .catch(() => { if (alive) setOpenaiReady(null) })
+    check()
+    const t = setInterval(check, 30000)
     return () => { alive = false; clearInterval(t) }
   }, [])
-  if (!state || state.tavily) return null
+
   return (
-    <div className="err mb">
-      No Tavily API key configured. Outbound campaigns auto-pause (research needs
-      Tavily); inbound replies keep working from the knowledge base + OpenAI only.
-      Add a key in <b>Super Admin → API Keys</b>.
-      {state.openai === false && ' OpenAI key is also missing — no emails will generate.'}
-    </div>
+    <OpenAIKeyContext.Provider value={{ openaiReady }}>
+      {openaiReady === false && (
+        <div className="err mb">
+          No OpenAI API key configured — emails cannot be generated.
+          Add the key in <b>Super Admin → API Keys</b>. Web research uses DuckDuckGo (free, no key needed).
+        </div>
+      )}
+      {children}
+    </OpenAIKeyContext.Provider>
   )
 }
 
@@ -321,10 +333,11 @@ export default function App() {
             <UserPill me={me} onNavigate={setPage} onSignOut={signOut} />
           </div>
         </div>
-        <KeyStatusBanner />
-        <ErrorBoundary resetKey={page} onGoHome={() => setPage('dashboard')}>
-          <Page />
-        </ErrorBoundary>
+        <KeyStatusBanner>
+  <ErrorBoundary resetKey={page} onGoHome={() => setPage('dashboard')}>
+    <Page />
+  </ErrorBoundary>
+</KeyStatusBanner>
       </main>
     </div>
   )

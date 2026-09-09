@@ -175,3 +175,52 @@ def purge_older(request: Request, days: int = Query(90, ge=7, le=365), db: Sessi
     audit.log(db, user, "mail_records.purge", "email_message", "", f"{n} record(s) older than {days}d",
              request.client.host if request.client else "")
     return {"deleted": n, "cutoff": cutoff.isoformat()}
+
+
+@router.get("/feed/new")
+def feed_new(since_id: int = Query(0), agent_id: int | None = Query(None),
+             db: Session = Depends(get_db)):
+    """Real-time polling endpoint — returns only records created AFTER since_id.
+    The frontend polls this every 8 seconds to update Mail Records without a
+    full page reload. Returns max 50 newest; caller updates its since_id to
+    the highest id seen."""
+    q = (db.query(models.EmailMessage)
+           .filter(models.EmailMessage.id > since_id,
+                   models.EmailMessage.is_spam.is_(False)))
+    if agent_id:
+        q = q.filter(models.EmailMessage.agent_id == agent_id)
+    rows = q.order_by(models.EmailMessage.id.desc()).limit(50).all()
+    lead_ids = {r.lead_id for r in rows if r.lead_id}
+    agent_ids = {r.agent_id for r in rows if r.agent_id}
+    leads_by = {l.id: l for l in db.query(models.Lead).filter(
+        models.Lead.id.in_(lead_ids)).all()} if lead_ids else {}
+    agents_by = {a.id: a for a in db.query(models.Agent).filter(
+        models.Agent.id.in_(agent_ids)).all()} if agent_ids else {}
+    return [{"id": r.id, "direction": r.direction,
+             "subject": (r.subject or "")[:200],
+             "preview": (r.body or "")[:180],
+             "created_at": r.created_at.isoformat() if r.created_at else "",
+             "lead_email": (leads_by.get(r.lead_id) or models.Lead()).email or "",
+             "lead_name": (leads_by.get(r.lead_id) or models.Lead()).name or "",
+             "lead_company": (leads_by.get(r.lead_id) or models.Lead()).company or "",
+             "agent_name": (agents_by.get(r.agent_id) or models.Agent()).name or "",
+             } for r in rows]
+
+
+@router.get("/{mid}/full")
+def get_record_full(mid: int, db: Session = Depends(get_db)):
+    """Full email body for the detail drawer."""
+    r = db.get(models.EmailMessage, mid)
+    if not r:
+        raise HTTPException(404, "Not found")
+    lead = db.get(models.Lead, r.lead_id) if r.lead_id else None
+    agent = db.get(models.Agent, r.agent_id) if r.agent_id else None
+    return {"id": r.id, "direction": r.direction, "subject": r.subject or "",
+            "body": r.body or "", "from_addr": r.from_addr or "",
+            "html_used": r.html_used, "is_spam": r.is_spam,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "lead_email": lead.email if lead else "",
+            "lead_name": lead.name if lead else "",
+            "lead_company": lead.company if lead else "",
+            "agent_name": agent.name if agent else "",
+            "website": lead.website if lead else ""}

@@ -14,6 +14,5 @@ celery.conf.beat_schedule = {
     "poll-inbox-every-2-min": {"task": "app.tasks.poll_inbox", "schedule": 120.0},
     "followup-sweep-hourly": {"task": "app.tasks.followup_sweep", "schedule": 3600.0},
     "purge-garbage-daily": {"task": "app.tasks.purge_garbage", "schedule": 86400.0},
-    "check-tavily-quota-every-3-min": {"task": "app.tasks.check_tavily_quota", "schedule": 180.0},
     "daily-db-backup": {"task": "app.tasks.daily_backup", "schedule": 86400.0},
 }

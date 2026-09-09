@@ -1,7 +1,7 @@
 """Leads: flexible upload (any excel/csv shape), enroll (select-all supported),
 research, manual send, delete. Hardened: 5 MB cap, extension allowlist."""
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Request
 from sqlalchemy.orm import Session
 from ..database import get_db
 from .. import models, schemas, audit
@@ -29,32 +29,10 @@ def list_leads(status: str | None = Query(default=None),
              .offset((page - 1) * per_page).limit(per_page).all())
 
 
-def _apply_lead_filters(qy, status, agent_id, unverified_only, unassigned_only, q):
-    """Shared filter builder so the paged list, the filtered count, and the
-    'enroll all matching' action always agree on exactly which rows match."""
-    from sqlalchemy import or_
-    qy = qy.filter(models.Lead.status != models.LeadStatus.garbage)
-    if status:
-        qy = qy.filter(models.Lead.status == status)
-    if agent_id:
-        qy = qy.filter(models.Lead.agent_id == agent_id)
-    if unverified_only:
-        qy = qy.filter(models.Lead.email_verified.is_(False))
-    if unassigned_only:
-        qy = qy.filter(models.Lead.agent_id.is_(None))
-    if q:
-        like = f"%{q.strip()}%"
-        qy = qy.filter(or_(models.Lead.email.ilike(like),
-                           models.Lead.name.ilike(like),
-                           models.Lead.company.ilike(like)))
-    return qy
-
-
 @router.get("/paged")
 def list_leads_paged(status: str | None = Query(default=None),
                      agent_id: int | None = Query(default=None),
                      unverified_only: bool = Query(default=False),
-                     unassigned_only: bool = Query(default=False),
                      q: str = Query(""),
                      page: int = Query(default=1, ge=1),
                      per_page: int = Query(default=30, ge=5, le=200),
@@ -62,8 +40,18 @@ def list_leads_paged(status: str | None = Query(default=None),
     """Paginated with total — the UI uses this for proper 'Page X of Y' pagers.
     Handles 50k+ leads cleanly."""
     from sqlalchemy import func, or_
-    qy = _apply_lead_filters(db.query(models.Lead), status, agent_id,
-                             unverified_only, unassigned_only, q)
+    qy = db.query(models.Lead).filter(models.Lead.status != models.LeadStatus.garbage)
+    if status:
+        qy = qy.filter(models.Lead.status == status)
+    if agent_id:
+        qy = qy.filter(models.Lead.agent_id == agent_id)
+    if unverified_only:
+        qy = qy.filter(models.Lead.email_verified.is_(False))
+    if q:
+        like = f"%{q.strip()}%"
+        qy = qy.filter(or_(models.Lead.email.ilike(like),
+                           models.Lead.name.ilike(like),
+                           models.Lead.company.ilike(like)))
     total = qy.with_entities(func.count(models.Lead.id)).scalar() or 0
     rows = (qy.order_by(models.Lead.priority.desc(), models.Lead.created_at.desc())
               .offset((page - 1) * per_page).limit(per_page).all())
@@ -119,36 +107,6 @@ def bulk_delete(ids: list[int], request: Request, db: Session = Depends(get_db),
     return {"deleted": n}
 
 
-@router.post("/bulk-garbage")
-def bulk_garbage(ids: list[int], db: Session = Depends(get_db)):
-    """Move many selected leads straight to Garbage (not deleted — reviewable).
-    Powers 'Suspicious (unverified) only -> select all -> Move to Garbage'."""
-    if not ids:
-        return {"moved": 0}
-    ids = list(dict.fromkeys(ids))[:5000]
-    n = (db.query(models.Lead).filter(models.Lead.id.in_(ids))
-         .update({models.Lead.status: models.LeadStatus.garbage},
-                 synchronize_session=False))
-    db.commit()
-    return {"moved": n}
-
-
-@router.post("/unverified-to-garbage")
-def unverified_to_garbage(db: Session = Depends(get_db)):
-    """Move every UNVERIFIED lead (email_verified is False) that isn't already
-    in garbage into garbage in one click. They aren't deleted — they sit in
-    Garbage where you can review, restore, or purge them. Genuine leads are no
-    longer wrongly flagged (see mailer.classify_recipient), so what lands here
-    is now a much cleaner 'actually bad' set."""
-    n = (db.query(models.Lead)
-         .filter(models.Lead.email_verified.is_(False),
-                 models.Lead.status != models.LeadStatus.garbage)
-         .update({models.Lead.status: models.LeadStatus.garbage},
-                 synchronize_session=False))
-    db.commit()
-    return {"moved": n}
-
-
 @router.post("/purge-completed")
 def purge_completed(days: int = Query(60, ge=7, le=365), db: Session = Depends(get_db)):
     """FIFO cleanup: delete completed/closed leads that haven't had ANY
@@ -183,37 +141,15 @@ def purge_completed(days: int = Query(60, ge=7, le=365), db: Session = Depends(g
 
 @router.get("/stats")
 def leads_stats(db: Session = Depends(get_db)):
-    """Counts by status PLUS the summary keys the Leads banner reads
-    (total/new/enrolled/contacted/replied/garbage). The banner was showing 0
-    because it read stats.total while this only returned per-status keys."""
+    """Counts by status (drives the FIFO / cleanup UI)."""
     from sqlalchemy import func
     rows = (db.query(models.Lead.status, func.count(models.Lead.id))
               .group_by(models.Lead.status).all())
-    by_status = {(s.value if hasattr(s, "value") else str(s)): n for s, n in rows}
-    total = sum(by_status.values())
-    out = {
-        "total": total,
-        "new": by_status.get("new", 0),
-        "enrolled": by_status.get("enrolled", 0),
-        "contacted": by_status.get("contacted", 0),
-        "replied": by_status.get("replied", 0),
-        "garbage": by_status.get("garbage", 0),
-    }
-    out.update(by_status)   # keep raw per-status keys too (back-compat)
-    return out
+    return {(s.value if hasattr(s, "value") else str(s)): n for s, n in rows}
 
 
 @router.post("/upload")
-async def upload_leads(file: UploadFile = File(...),
-                      agent_id: int | None = Form(None),
-                      campaign_id: int | None = Form(None),
-                      db: Session = Depends(get_db)):
-    """FAST bulk upload. The old version ran one DB query AND one live DNS
-    lookup PER ROW (≈2 blocking calls × N rows). Now: one query for all
-    existing emails, no DNS at upload (email_verified stays NULL = 'not checked
-    yet'), and a single bulk insert. DNS/SMTP happens later on 'Verify
-    mailboxes'. If agent_id + campaign_id are passed, leads land already
-    enrolled with that agent — no more one-by-one 'Pick agent'."""
+async def upload_leads(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.lower().endswith(ALLOWED_EXT):
         raise HTTPException(400, "Only .xlsx, .xls or .csv files are allowed")
     raw = await file.read()
@@ -224,47 +160,39 @@ async def upload_leads(file: UploadFile = File(...),
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
 
-    incoming = {(r.get("email") or "").strip().lower() for r in rows if r.get("email")}
-    seen = set()
-    if incoming:
-        for (e,) in db.query(models.Lead.email).filter(models.Lead.email.in_(incoming)):
-            seen.add((e or "").lower())
-
-    status = models.LeadStatus.enrolled if (agent_id and campaign_id) else models.LeadStatus.new
-    objs, skipped = [], 0
+    created, skipped, unverified = 0, 0, 0
     for row in rows:
-        email = (row.get("email") or "").strip().lower()
-        if not email or "@" not in email or email in seen:
+        if db.query(models.Lead).filter(models.Lead.email == row["email"]).first():
             skipped += 1
             continue
-        seen.add(email)
-        objs.append(models.Lead(**row, source="excel", email_verified=None,
-                                agent_id=agent_id, campaign_id=campaign_id, status=status))
-    db.bulk_save_objects(objs)
+        # MX-only at upload for speed (50k+ scale) — click "Verify mailboxes"
+        # for the deeper SMTP-level check.
+        ok, _reason = mailer.verify_recipient(row["email"], smtp=False)
+        if not ok:
+            unverified += 1
+        db.add(models.Lead(**row, source="excel", email_verified=ok))
+        created += 1
     db.commit()
-    return {"created": len(objs), "skipped_duplicates": skipped,
-            "unverified": 0, "parsed": len(rows),
-            "assigned_to_agent": agent_id, "campaign_id": campaign_id}
+    return {"created": created, "skipped_duplicates": skipped,
+            "unverified": unverified, "parsed": len(rows)}
 
 
 @router.post("/verify")
 def verify_mailboxes(db: Session = Depends(get_db)):
-    """Full mailbox check (email-verify API if a key is configured, else SMTP
-    RCPT probe) for every non-garbage lead — not just ones already flagged
-    red. This matters: MX-only checking (used at upload for speed when no
-    verify API key is set) only proves the DOMAIN can receive mail — e.g.
-    'anything@gmail.com' passes MX because gmail.com has mail servers, even
-    if that exact mailbox doesn't exist. The API check (Super Admin -> API
-    Keys -> Email Verify) actually confirms the specific mailbox; the raw
-    SMTP fallback is best-effort since many networks block port 25 outbound
-    and Gmail specifically often won't give a clean answer at RCPT time.
-    Capped at 500/call — click again to sweep further on very large lists."""
+    """MX-only check for every non-garbage lead. MX proves the DOMAIN can
+    receive mail — fast, no port-25 needed, works perfectly for Zoho/Gmail/
+    Outlook domains. SMTP RCPT probe removed: it's blocked by most modern mail
+    servers anyway, causing false negatives on real leads. The domain check is
+    enough to confirm the lead is at a real mail-receiving domain.
+    Capped at 500/call — click again for larger lists."""
     pending = (db.query(models.Lead)
-               .filter(models.Lead.status != models.LeadStatus.garbage)
+               .filter(models.Lead.status != models.LeadStatus.garbage,
+                       models.Lead.email_verified.isnot(True))
                .limit(500).all())
     confirmed, still_bad = 0, 0
     for lead in pending:
-        ok, _reason = mailer.verify_recipient(lead.email, smtp=True)
+        # MX-only: smtp=False means no SMTP RCPT probe, just DNS/MX lookup
+        ok, _reason = mailer.verify_recipient(lead.email, smtp=False)
         lead.email_verified = ok
         if ok:
             confirmed += 1
@@ -328,90 +256,6 @@ def enroll(data: schemas.EnrollIn, db: Session = Depends(get_db)):
         n += 1
     db.commit()
     return {"enrolled": n, "campaign_id": campaign.id, "blocked": blocked}
-
-
-@router.post("/enroll-by-filter")
-def enroll_by_filter(data: schemas.EnrollByFilter, db: Session = Depends(get_db)):
-    """SELECT-ALL-MATCHING enroll+launch. Instead of shipping 50k lead IDs from
-    the browser, the UI sends the current filter (status / agent / unverified /
-    unassigned / search) and the target campaign + agent. Every matching
-    launchable lead (status new|enrolled) is enrolled and split into batches of
-    campaign.batch_size, staggered per-agent — the same pipeline as /launch.
-
-    This is what powers 'Select all N matching leads → Enroll & launch' on the
-    Leads page, and 'assign all unassigned leads to <agent>'.
-
-    Leads already emailed TODAY by a different agent are skipped (24h lock) and
-    reported back in `blocked_count`. Capped at `max_leads` per call so a single
-    click can't queue an unbounded job."""
-    import random
-    from ..tasks import start_campaign_lead
-
-    campaign = db.get(models.Campaign, data.campaign_id)
-    if not campaign:
-        raise HTTPException(404, "Campaign not found")
-    requested_agent_id = data.agent_id or campaign.agent_id
-    if not requested_agent_id:
-        raise HTTPException(400, "No agent selected (and campaign has no default agent)")
-    agent = db.get(models.Agent, requested_agent_id)
-    if not agent:
-        raise HTTPException(404, "Agent not found")
-
-    qy = _apply_lead_filters(db.query(models.Lead), data.status, data.filter_agent_id,
-                             data.unverified_only, data.unassigned_only, data.q)
-    qy = qy.filter(models.Lead.status.in_([models.LeadStatus.new,
-                                           models.LeadStatus.enrolled]))
-    cap = max(1, min(data.max_leads or 20000, 50000))
-    leads = qy.order_by(models.Lead.priority.desc()).limit(cap).all()
-    if not leads:
-        return {"enrolled": 0, "queued": 0, "blocked_count": 0, "batches": []}
-
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    # bulk-load which of these leads a DIFFERENT agent already emailed today
-    ids = [l.id for l in leads]
-    locked = {}
-    for lid, aid in (db.query(models.EmailMessage.lead_id, models.EmailMessage.agent_id)
-                     .filter(models.EmailMessage.lead_id.in_(ids),
-                             models.EmailMessage.direction == "out",
-                             models.EmailMessage.agent_id.isnot(None),
-                             models.EmailMessage.created_at >= today_start).all()):
-        locked.setdefault(lid, set()).add(aid)
-
-    launchable = [l for l in leads
-                  if not (locked.get(l.id, set()) - {requested_agent_id})]
-    blocked_count = len(leads) - len(launchable)
-    if not launchable:
-        return {"enrolled": 0, "queued": 0, "blocked_count": blocked_count, "batches": []}
-
-    size = max(10, min(2000, campaign.batch_size or 50))
-    existing = db.query(models.Batch).filter(models.Batch.campaign_id == campaign.id).count()
-    lo = agent.outbound_delay_min or 180
-    hi = agent.outbound_delay_max or 720
-    batches_made, batch_offset = [], 0
-
-    for i in range(0, len(launchable), size):
-        chunk = launchable[i:i + size]
-        batch = models.Batch(campaign_id=campaign.id,
-                             number=existing + len(batches_made) + 1,
-                             total=len(chunk), status=models.BatchStatus.pending)
-        db.add(batch)
-        db.flush()
-        cursor = 0
-        for lead in chunk:
-            lead.campaign_id = campaign.id
-            lead.agent_id = requested_agent_id
-            lead.batch_id = batch.id
-            lead.status = models.LeadStatus.enrolled
-            delay = batch_offset + random.randint(min(lo, hi), max(lo, hi)) \
-                    + cursor * random.randint(20, 60)
-            start_campaign_lead.apply_async(args=[lead.id], countdown=delay)
-            cursor += 1
-        batches_made.append(batch.id)
-        batch_offset += len(chunk) * ((lo + hi) // 2)
-    db.commit()
-    return {"enrolled": len(launchable), "queued": len(launchable),
-            "blocked_count": blocked_count, "batches": batches_made,
-            "batch_size": size}
 
 
 @router.post("/{lead_id}/research", response_model=schemas.LeadOut)

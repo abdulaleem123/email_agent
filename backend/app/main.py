@@ -17,16 +17,32 @@ from .migrate import run_migrations
 from .bootstrap import bootstrap
 from .security_middleware import RateLimitMiddleware, CSRFMiddleware
 
-Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine,checkfirst=True)
 run_migrations()
 bootstrap()
 
 app = FastAPI(title=settings.APP_NAME, docs_url="/docs" if settings.DEBUG else None)
 
+# Allow the configured origin + common local dev origins
+# (localhost, 127.0.0.1, and WSL2/LAN IPs like 172.x.x.x / 192.168.x.x)
+_extra_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "http://192.168.0.104:8000",
+    "http://192.168.0.104:5173",
+]
+
+_allowed_origins = list(dict.fromkeys(
+    [settings.FRONTEND_ORIGIN] + _extra_origins
+))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_ORIGIN, "http://127.0.0.1:5173"],
-    allow_credentials=True,   # required so the browser sends/accepts the httpOnly session cookie
+    allow_origins=_allowed_origins,
+    allow_origin_regex=r"http://(172\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+):\d+",  # WSL2 + LAN
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
 )

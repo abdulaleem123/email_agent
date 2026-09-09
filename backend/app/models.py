@@ -90,6 +90,7 @@ class Agent(Base):
     outbound_delay_min = Column(Integer, default=60)     # 1 min
     outbound_delay_max = Column(Integer, default=300)    # 5 min
     reply_delay_seconds = Column(Integer, default=900)   # inbound reply ~15 min
+    followup_after_hours = Column(Integer, default=None)  # None = use global setting   
     # --- per-agent mailbox: each agent sends/receives from its OWN email ---
     smtp_host = Column(String(200), default="")          # e.g. smtp.gmail.com / smtp.hostinger.com
     smtp_port = Column(Integer, default=587)
@@ -169,7 +170,7 @@ class Lead(Base):
     temperature = Column(Enum(Temperature), default=Temperature.cold)
     confidence = Column(Integer, default=20)
     priority = Column(Float, default=0.0, index=True)
-    company_research = Column(Text, default="")          # Tavily advanced research
+    company_research = Column(Text, default="")          # DuckDuckGo web research
     pain_points = Column(Text, default="")               # extracted pain points
     email_verified = Column(Boolean, default=False)      # MX check passed (red row if False)
     unsubscribed = Column(Boolean, default=False)         # honor List-Unsubscribe -> never email again
@@ -257,11 +258,11 @@ class Notification(Base):
 
 
 class ApiUsage(Base):
-    """Every LLM / embedding / Tavily call recorded for the super-admin
+    """Every LLM / embedding / search call recorded for the super-admin
     usage dashboard (real-time input/output tokens + cost, per agent)."""
     __tablename__ = "api_usage"
     id = Column(Integer, primary_key=True)
-    provider = Column(String(20), index=True)            # openai | tavily
+    provider = Column(String(20), index=True)            # openai | duckduckgo
     kind = Column(String(30), default="chat")            # chat | embedding | search | moderation
     model = Column(String(80), default="")
     agent_id = Column(Integer, ForeignKey("agents.id"), nullable=True, index=True)
@@ -272,7 +273,7 @@ class ApiUsage(Base):
 
 
 class ResearchCache(Base):
-    """Tavily results cached by email/company-domain: one research per lead
+    """Web research cached by email/company-domain: one research per lead
     EVER — a second campaign or agent reuses the cache, zero extra credits."""
     __tablename__ = "research_cache"
     id = Column(Integer, primary_key=True)
@@ -321,7 +322,7 @@ class AuditLog(Base):
 
 class PitchRecord(Base):
     """A generated sales-call TRANSCRIPT (pitch) for a lead, produced by the
-    Pitch Decker: Osaja researches the lead (cached Tavily) and role-plays a
+    Pitch Decker: Osaja researches the lead (cached DuckDuckGo) and role-plays a
     region-aware sales conversation that ends in the client agreeing. Stored
     so the team can review how a strong pitch would go."""
     __tablename__ = "pitch_records"
