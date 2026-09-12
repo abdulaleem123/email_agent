@@ -62,6 +62,12 @@ def bulk_delete_pitches(data: BulkPitchIds, db: Session = Depends(get_db)):
     db.commit()
     return {"deleted": n}
 
+@router.post("/delete-all")
+def delete_all_pitches(db: Session = Depends(get_db)):
+    n = db.query(models.PitchRecord).delete(synchronize_session=False)
+    db.commit()
+    return {"deleted": n}
+
 
 @router.get("/{pid}", response_model=schemas.PitchOut)
 def get_pitch(pid: int, db: Session = Depends(get_db)):

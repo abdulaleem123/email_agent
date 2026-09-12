@@ -33,6 +33,7 @@ def list_leads(status: str | None = Query(default=None),
 def list_leads_paged(status: str | None = Query(default=None),
                      agent_id: int | None = Query(default=None),
                      unverified_only: bool = Query(default=False),
+                     pitch_pending: bool = Query(default=False),
                      q: str = Query(""),
                      page: int = Query(default=1, ge=1),
                      per_page: int = Query(default=30, ge=5, le=200),
@@ -47,19 +48,26 @@ def list_leads_paged(status: str | None = Query(default=None),
         qy = qy.filter(models.Lead.agent_id == agent_id)
     if unverified_only:
         qy = qy.filter(models.Lead.email_verified.is_(False))
+    if pitch_pending:
+        # only leads not marked done in Pitch Decker
+        qy = qy.filter(models.Lead.pitch_done.is_(False))
     if q:
         like = f"%{q.strip()}%"
         qy = qy.filter(or_(models.Lead.email.ilike(like),
                            models.Lead.name.ilike(like),
                            models.Lead.company.ilike(like)))
-    total = qy.with_entities(func.count(models.Lead.id)).scalar() or 0
-    rows = (qy.order_by(models.Lead.priority.desc(), models.Lead.created_at.desc())
-              .offset((page - 1) * per_page).limit(per_page).all())
+
+    total = qy.count()
+
+    if pitch_pending:
+        rows = (qy.order_by(models.Lead.created_at.asc())
+                  .offset((page - 1) * per_page).limit(per_page).all())
+    else:
+        rows = (qy.order_by(models.Lead.priority.desc(), models.Lead.created_at.desc())
+                  .offset((page - 1) * per_page).limit(per_page).all())
+
     agent_names = {a.id: a.name for a in db.query(models.Agent.id, models.Agent.name).all()}
 
-    # Same-day dedupe: for leads on THIS page, find any outbound email sent
-    # TODAY by a DIFFERENT agent than the one assigned — that locks the lead
-    # until midnight UTC (the exact restriction the celery worker enforces).
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     page_ids = [l.id for l in rows]
     locked_rows = []
@@ -70,7 +78,7 @@ def list_leads_paged(status: str | None = Query(default=None),
                                models.EmailMessage.agent_id.isnot(None),
                                models.EmailMessage.created_at >= today_start)
                        .all())
-    sent_today_by = {}   # lead_id -> set of agent_ids who emailed it today
+    sent_today_by = {}
     for lead_id, agent_id in locked_rows:
         sent_today_by.setdefault(lead_id, set()).add(agent_id)
     unlock_at = today_start + timedelta(days=1)
@@ -81,13 +89,35 @@ def list_leads_paged(status: str | None = Query(default=None),
         d["agent_name"] = agent_names.get(l.agent_id, "")
         senders_today = sent_today_by.get(l.id, set())
         if senders_today and (senders_today - {l.agent_id}):
-            d["locked_until"] = unlock_at   # a DIFFERENT agent already sent today
+            d["locked_until"] = unlock_at
         items.append(d)
     return {
         "page": page, "per_page": per_page, "total": total,
         "pages": (total + per_page - 1) // per_page,
         "items": items,
     }
+
+
+@router.post("/{lead_id}/pitch-done")
+def mark_pitch_done(lead_id: int, db: Session = Depends(get_db)):
+    lead = db.get(models.Lead, lead_id)
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+    lead.pitch_done = True
+    db.commit()
+    return {"ok": True, "id": lead_id}
+
+
+@router.delete("/{lead_id}/pitch-done")
+def unmark_pitch_done(lead_id: int, db: Session = Depends(get_db)):
+    lead = db.get(models.Lead, lead_id)
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+    lead.pitch_done = False
+    db.commit()
+    return {"ok": True, "id": lead_id}
+
+
 
 
 @router.post("/bulk-delete")

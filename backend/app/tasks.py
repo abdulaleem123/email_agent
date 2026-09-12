@@ -24,15 +24,50 @@ def _notify(db, kind: str, title: str, body: str = "", agent_id: int | None = No
     db.commit()
 
 
-def _outbound_delay(agent) -> int:
-    lo = agent.outbound_delay_min or settings.OUTBOUND_DELAY_MIN_SECONDS
-    hi = agent.outbound_delay_max or settings.OUTBOUND_DELAY_MAX_SECONDS
+
+
+def _get_setting_int(db, key: str, fallback: int) -> int:
+    from .routers.app_settings import get_runtime_setting
+    val = get_runtime_setting(db, key)
+    if val is None:
+        return fallback
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _outbound_delay(agent, db=None) -> int:
+    lo = agent.outbound_delay_min
+    hi = agent.outbound_delay_max
+    if lo is None or hi is None:
+        close = False
+        if db is None:
+            db = SessionLocal()
+            close = True
+        try:
+            if lo is None:
+                lo = _get_setting_int(db, "outbound_delay_min", settings.OUTBOUND_DELAY_MIN_SECONDS)
+            if hi is None:
+                hi = _get_setting_int(db, "outbound_delay_max", settings.OUTBOUND_DELAY_MAX_SECONDS)
+        finally:
+            if close:
+                db.close()
     return random.randint(min(lo, hi), max(lo, hi))
 
 
-def _reply_delay(agent) -> int:
-    return agent.reply_delay_seconds or settings.INBOUND_REPLY_DELAY_SECONDS
-
+def _reply_delay(agent, db=None) -> int:
+    if agent.reply_delay_seconds is not None:
+        return agent.reply_delay_seconds
+    close = False
+    if db is None:
+        db = SessionLocal()
+        close = True
+    try:
+        return _get_setting_int(db, "inbound_reply_delay", settings.INBOUND_REPLY_DELAY_SECONDS)
+    finally:
+        if close:
+            db.close()
 
 def _today_start() -> datetime:
     return datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -200,7 +235,7 @@ def poll_inbox():
                 if (agent and agent.is_active
                         and (campaign is None or campaign.status == "active")
                         and not cold_optout):
-                    auto_reply.apply_async(args=[lead.id], countdown=_reply_delay(agent))
+                    auto_reply.apply_async(args=[lead.id], countdown=_reply_delay(agent, db))
                 processed += 1
     finally:
         db.close()
@@ -362,7 +397,7 @@ def followup_sweep():
         leads = (db.query(models.Lead)
          .filter(models.Lead.status == models.LeadStatus.contacted,
                  models.Lead.last_outbound_at.isnot(None),
-                 models.Lead.followups_sent < settings.MAX_FOLLOWUPS,
+                 models.Lead.followups_sent < _get_setting_int(db, "max_followups", settings.MAX_FOLLOWUPS),
                  models.Lead.agent_id.isnot(None))
          .all())
         for lead in leads:
@@ -373,14 +408,14 @@ def followup_sweep():
             if not agent or not agent.is_active or (campaign and campaign.status != "active"):
                 continue
             # Per-agent timing: use agent.followup_after_hours if set, else global setting
-            agent_hours = getattr(agent, "followup_after_hours", None) or settings.FOLLOWUP_AFTER_HOURS
+            agent_hours = getattr(agent, "followup_after_hours", None) or _get_setting_int(db, "followup_after_hours", settings.FOLLOWUP_AFTER_HOURS)
             cutoff = datetime.utcnow() - timedelta(hours=agent_hours)
             if lead.last_outbound_at >= cutoff:
                 continue  # not yet time for this agent's followup
             lead.followups_sent += 1
             lead.last_outbound_at = datetime.utcnow()
             db.commit()
-            send_followup.apply_async(args=[lead.id], countdown=_outbound_delay(agent))
+            send_followup.apply_async(args=[lead.id], countdown=_outbound_delay(agent, db))
             scheduled += 1
     finally:
         db.close()
@@ -434,7 +469,7 @@ def send_followup(self, lead_id: int):
                                    direction="out", sent_by="agent",
                                    subject=subject, body=body, message_id=msg_id))
         # After the final follow-up (3rd), mark lead as closed — never contact again
-        max_fu = settings.MAX_FOLLOWUPS
+        max_fu = _get_setting_int(db, "max_followups", settings.MAX_FOLLOWUPS)
         if lead.followups_sent >= max_fu:
             lead.status = models.LeadStatus.closed
             db.add(models.EmailMessage(
@@ -460,7 +495,7 @@ def purge_garbage():
     """Auto-delete old garbage so memory/DB size never balloons (daily)."""
     db = SessionLocal()
     try:
-        cutoff = datetime.utcnow() - timedelta(days=settings.GARBAGE_RETENTION_DAYS)
+        cutoff = datetime.utcnow() - timedelta(days=_get_setting_int(db, "garbage_retention_days", settings.GARBAGE_RETENTION_DAYS))
         n = (db.query(models.EmailMessage)
              .filter(models.EmailMessage.is_spam.is_(True),
                      models.EmailMessage.created_at < cutoff)

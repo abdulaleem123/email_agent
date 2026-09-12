@@ -34,6 +34,7 @@ ADDITIVE = {
         ("upload_tag", "VARCHAR(200) DEFAULT ''"),
         ("unsubscribed", "BOOLEAN DEFAULT 0"),
         ("unsub_token", "VARCHAR(64) DEFAULT ''"),
+        ("pitch_done", "BOOLEAN DEFAULT 0"), 
     ],
     "campaigns": [
         ("what_to_sell", "TEXT DEFAULT ''"),

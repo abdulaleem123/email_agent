@@ -176,6 +176,7 @@ class Lead(Base):
     unsubscribed = Column(Boolean, default=False)         # honor List-Unsubscribe -> never email again
     unsub_token = Column(String(64), default="", unique=False)  # public no-auth unsub link token
     ai_paused = Column(Boolean, default=False)           # human takeover on this thread
+    pitch_done = Column(Boolean, default=False, index=True)  # marked done in Pitch Decker
     upload_tag = Column(String(200), default="", index=True)  # which excel sheet it came from
     followups_sent = Column(Integer, default=0)
     last_outbound_at = Column(DateTime, nullable=True)

@@ -1,6 +1,5 @@
 """Settings page: runtime toggles with realtime effect (stored in DB KV)."""
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..config import settings as env
@@ -22,8 +21,6 @@ DEFAULTS = {
 }
 
 
-class SettingsIn(BaseModel):
-    values: dict[str, str]
 
 
 @router.get("")
@@ -33,8 +30,10 @@ def get_settings(db: Session = Depends(get_db)):
 
 
 @router.put("")
-def put_settings(data: SettingsIn, db: Session = Depends(get_db)):
-    for k, v in data.values.items():
+def put_settings(data: dict, db: Session = Depends(get_db)):
+    # Accept flat body from frontend {key: value} OR nested {values: {...}}
+    payload = data.get("values") if isinstance(data.get("values"), dict) else data
+    for k, v in payload.items():
         if k not in DEFAULTS:
             continue
         row = db.get(models.SettingKV, k)
@@ -45,3 +44,12 @@ def put_settings(data: SettingsIn, db: Session = Depends(get_db)):
     db.commit()
     stored = {s.key: s.value for s in db.query(models.SettingKV).all()}
     return {**DEFAULTS, **stored}
+
+
+
+def get_runtime_setting(db, key: str, default=None):
+    """Settings page value (DB) wins over .env DEFAULTS."""
+    row = db.get(models.SettingKV, key)
+    if row is not None and row.value not in (None, ""):
+        return row.value
+    return DEFAULTS.get(key, default)
