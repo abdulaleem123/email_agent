@@ -35,10 +35,18 @@ export default function Agents() {
   }
 
   const save = async () => {
-    try { await api.saveAgent(edit); setEdit(null); setTestResult(null); load(); show('Agent saved') }
-    catch (e) { show(e.message, true) }
-  }
+  try { await api.saveAgent(edit, edit.id); setEdit(null); setTestResult(null); load(); show('Agent saved') }
+  catch (e) { show(e.message, true) }
+}
 
+  const del = async (a) => {
+    if (!window.confirm(`Delete agent "${a.name}"? This cannot be undone.`)) return
+    try {
+      await api.deleteAgent(a.id)
+      load()
+      show(`${a.name} deleted`)
+    } catch (e) { show(e.message, true) }
+  }
   const set = (k, v) => setEdit(ed => ({ ...ed, [k]: v }))
 
   return (
@@ -79,12 +87,13 @@ export default function Agents() {
               </span>
             </div>
             <div className="row mt">
-              <button className="btn ghost small" onClick={() => setEdit({ ...a })}>Configure</button>
-            </div>
+            <button className="btn ghost small" onClick={() => setEdit({ ...a })}>Configure</button>
+            <button className="btn ghost small" style={{ color: 'var(--hot)' }} onClick={() => del(a)}>Delete</button>
+          </div>
           </div>
         ))}
       </div>
-      {agents.length < 4 && (
+      {agents.length < 10 && (
         <button className="btn mt" onClick={() => setEdit({ ...BLANK })}>+ New agent</button>
       )}
 

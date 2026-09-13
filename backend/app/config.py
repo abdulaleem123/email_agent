@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     # --- Core ---
     APP_NAME: str = "Chatversio AI Email CRM"
     DEBUG: bool = False
-    DATABASE_URL: str = "sqlite:///./chatversio.db"     # postgres:// in prod
+    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/chatversio"  # Postgres + pgvector required (no SQLite)
     FRONTEND_ORIGIN: str = "http://localhost:5173"
     PUBLIC_API_URL: str = "http://localhost:8000"     # publicly reachable backend URL, used to build the
                                                         # unsubscribe link email clients call directly (no auth)
@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     INBOUND_REPLY_DELAY_SECONDS: int = 900     # ~15 min humanized reply
     FOLLOWUP_AFTER_HOURS: int = 24
     MAX_FOLLOWUPS: int = 3
-    MAX_AGENTS: int = 4
+    MAX_AGENTS: int = 10
     BATCH_SIZE_MIN: int = 20
     BATCH_SIZE_MAX: int = 50
     GARBAGE_RETENTION_DAYS: int = 30           # auto-purge old garbage

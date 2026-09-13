@@ -84,6 +84,7 @@ export const api = {
     id
       ? request(`/api/agents/${id}`, { method: 'PUT', body: JSON.stringify(data) })
       : request('/api/agents', { method: 'POST', body: JSON.stringify(data) }),
+  deleteAgent: (id) => request(`/api/agents/${id}`, { method: 'DELETE' }),   // ← ADD THIS
   toggleAgent: (id) => request(`/api/agents/${id}/toggle`, { method: 'POST' }),
   testMailboxConnection: (payload) =>
     request('/api/agents/test-connection', { method: 'POST', body: JSON.stringify(payload) }),

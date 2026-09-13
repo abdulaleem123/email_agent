@@ -7,7 +7,7 @@ from ..database import get_db
 from .. import models, schemas, audit
 from ..security import current_user
 from ..services import excel_import, tavily, mailer, keys as keysvc
-
+from pydantic import BaseModel
 router = APIRouter(prefix="/api/leads", tags=["leads"])
 ALLOWED_EXT = (".xlsx", ".xls", ".csv")
 MAX_UPLOAD = 5 * 1024 * 1024
@@ -118,23 +118,53 @@ def unmark_pitch_done(lead_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "id": lead_id}
 
 
+class BulkIds(BaseModel):
+    ids: list[int] = []
+    to_garbage: bool = False
+    unverified: bool = False
 
 
 @router.post("/bulk-delete")
-def bulk_delete(ids: list[int], request: Request, db: Session = Depends(get_db),
+def bulk_delete(data: BulkIds, request: Request, db: Session = Depends(get_db),
                 user: models.User = Depends(current_user)):
-    """Delete many leads at once (used by the 'select multiple + delete' UI)."""
+    ids = list(dict.fromkeys(data.ids))[:1000] if data.ids else []
+
+    if data.unverified:
+        q = db.query(models.Lead).filter(
+            models.Lead.status != models.LeadStatus.garbage,
+            models.Lead.email_verified.is_(False),
+        )
+        n = 0
+        for lead in q.all():
+            lead.status = models.LeadStatus.garbage
+            n += 1
+        db.commit()
+        audit.log(db, user, "leads.unverified_to_garbage", "lead", "", f"{n} lead(s)",
+                  request.client.host if request.client else "")
+        return {"moved": n, "deleted": 0}
+
     if not ids:
-        return {"deleted": 0}
-    ids = list(dict.fromkeys(ids))[:1000]      # cap at 1000/req
+        return {"deleted": 0, "moved": 0}
+
+    if data.to_garbage:
+        n = 0
+        for lead in db.query(models.Lead).filter(models.Lead.id.in_(ids)).all():
+            lead.status = models.LeadStatus.garbage
+            n += 1
+        db.commit()
+        audit.log(db, user, "leads.bulk_garbage", "lead", "", f"{n} lead(s)",
+                  request.client.host if request.client else "")
+        return {"moved": n, "deleted": 0}
+
+    # Hard delete
     db.query(models.EmailMessage).filter(models.EmailMessage.lead_id.in_(ids))\
       .delete(synchronize_session=False)
     n = db.query(models.Lead).filter(models.Lead.id.in_(ids))\
           .delete(synchronize_session=False)
     db.commit()
     audit.log(db, user, "leads.bulk_delete", "lead", "", f"{n} lead(s)",
-             request.client.host if request.client else "")
-    return {"deleted": n}
+              request.client.host if request.client else "")
+    return {"deleted": n, "moved": 0}
 
 
 @router.post("/purge-completed")

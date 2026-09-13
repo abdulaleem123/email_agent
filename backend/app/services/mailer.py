@@ -270,9 +270,7 @@ def test_connection(smtp_creds: dict, imap_creds: dict | None) -> dict:
     result = {"smtp": {"ok": False, "detail": ""}, "imap": {"ok": False, "detail": ""}}
 
     try:
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP(smtp_creds["host"], int(smtp_creds["port"]), timeout=15) as s:
-            s.starttls(context=ctx)
+        with _open_smtp(smtp_creds["host"], smtp_creds["port"], timeout=15) as s:
             s.login(smtp_creds["user"], smtp_creds["password"])
         result["smtp"] = {"ok": True, "detail": "SMTP login succeeded"}
     except smtplib.SMTPAuthenticationError as e:
@@ -337,12 +335,31 @@ def imap_creds_for(agent=None) -> dict | None:
     return None
 
 
+# ------------------------------------------------------------- SMTP connect helper
+def _open_smtp(host: str, port: int | str, timeout: int = 30):
+    """Open SMTP ready for login.
+    Port 465 → SMTP_SSL (Zoho smtppro.zoho.com, etc.)
+    Other ports (587) → SMTP + STARTTLS (Gmail, etc.)
+    Host/port/user/password still come from agent config or .env at runtime.
+    """
+    ctx = ssl.create_default_context()
+    port = int(port)
+    if port == 465:
+        s = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ctx)
+        s.ehlo()
+        return s
+    s = smtplib.SMTP(host, port, timeout=timeout)
+    s.ehlo()
+    s.starttls(context=ctx)
+    s.ehlo()
+    return s
+
+
+
 # ------------------------------------------------------------- send
 def _smtp_send(msg, to_addr: str, creds: dict):
-    ctx = ssl.create_default_context()
     raw = _maybe_dkim_sign(msg.as_bytes())
-    with smtplib.SMTP(creds["host"], creds["port"], timeout=30) as s:
-        s.starttls(context=ctx)
+    with _open_smtp(creds["host"], creds["port"], timeout=30) as s:
         s.login(creds["user"], creds["password"])
         s.sendmail(creds["from_addr"], [to_addr], raw)
 

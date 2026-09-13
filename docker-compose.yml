@@ -1,12 +1,139 @@
+# version: "3.9"
+
+# # ─────────────────────────────────────────────────────────────
+# #  Chatversio AI Email CRM  –  Full Stack Docker Compose
+# #  Run:   docker compose up --build
+# #  Open:  http://localhost:5173
+# # ─────────────────────────────────────────────────────────────
+
+# services:
+
+#   # ── Redis ──────────────────────────────────────────────────
+#   redis:
+#     image: redis:7-alpine
+#     restart: unless-stopped
+#     ports:
+#       - "6379:6379"
+#     healthcheck:
+#       test: ["CMD", "redis-cli", "ping"]
+#       interval: 5s
+#       timeout: 3s
+#       retries: 10
+
+#   # ── FastAPI backend ────────────────────────────────────────
+#   api:
+#     build: ./backend
+#     restart: unless-stopped
+#     env_file: ./backend/.env
+#     environment:
+#       - REDIS_URL=redis://redis:6379/0
+#       - FRONTEND_ORIGIN=http://localhost:5173
+#     ports:
+#       - "8000:8000"
+#     # volumes:
+#     #   - db_data:/srv/data
+#     depends_on:
+#       redis:
+#         condition: service_healthy
+#     command: >
+#       gunicorn app.main:app
+#       -k uvicorn.workers.UvicornWorker
+#       -b 0.0.0.0:8000
+#       --workers 1
+#       --timeout 120
+#     healthcheck:
+#       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+#       interval: 10s
+#       timeout: 5s
+#       retries: 10
+#       start_period: 15s
+
+#   # ── Celery worker ──────────────────────────────────────────
+#   worker:
+#     build: ./backend
+#     restart: unless-stopped
+#     env_file: ./backend/.env
+#     environment:
+#       - REDIS_URL=redis://redis:6379/0
+#     # volumes:
+#     #   - db_data:/srv/data
+#     depends_on:
+#       redis:
+#         condition: service_healthy
+#     command: >
+#       celery -A app.celery_app.celery worker
+#       --loglevel=info
+#       --concurrency=2
+#       --pool=solo
+
+#   # ── Celery beat (scheduler) ────────────────────────────────
+#   beat:
+#     build: ./backend
+#     restart: unless-stopped
+#     env_file: ./backend/.env
+#     environment:
+#       - REDIS_URL=redis://redis:6379/0
+#     # volumes:
+#     #   - db_data:/srv/data
+#     depends_on:
+#       redis:
+#         condition: service_healthy
+#     command: celery -A app.celery_app.celery beat --loglevel=info
+
+#   # ── Vite frontend ──────────────────────────────────────────
+#   frontend:
+#     build: ./frontend
+#     restart: unless-stopped
+#     ports:
+#       - "5173:5173"
+#     depends_on:
+#       api:
+#         condition: service_healthy
+
+#     db:
+#   image: pgvector/pgvector:pg16
+#   ports:
+#     - "5432:5432"
+
+
+# volumes:
+#   db_data:
+
+
 version: "3.9"
 
 # ─────────────────────────────────────────────────────────────
-#  Chatversio AI Email CRM  –  Full Stack Docker Compose
+#  Chatversio AI Email CRM  –  Full Stack (Postgres + pgvector)
 #  Run:   docker compose up --build
 #  Open:  http://localhost:5173
+#
+#  Unique ports:
+#    5432  → Postgres + pgvector
+#    6379  → Redis
+#    8000  → FastAPI
+#    5173  → Frontend
 # ─────────────────────────────────────────────────────────────
 
 services:
+
+  # ── Postgres + pgvector ────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: chatversio
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chatversio"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   # ── Redis ──────────────────────────────────────────────────
   redis:
@@ -26,13 +153,14 @@ services:
     restart: unless-stopped
     env_file: ./backend/.env
     environment:
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/chatversio
       - REDIS_URL=redis://redis:6379/0
       - FRONTEND_ORIGIN=http://localhost:5173
     ports:
       - "8000:8000"
-    # volumes:
-    #   - db_data:/srv/data
     depends_on:
+      db:
+        condition: service_healthy
       redis:
         condition: service_healthy
     command: >
@@ -46,7 +174,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 15s
+      start_period: 25s
 
   # ── Celery worker ──────────────────────────────────────────
   worker:
@@ -54,10 +182,11 @@ services:
     restart: unless-stopped
     env_file: ./backend/.env
     environment:
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/chatversio
       - REDIS_URL=redis://redis:6379/0
-    # volumes:
-    #   - db_data:/srv/data
     depends_on:
+      db:
+        condition: service_healthy
       redis:
         condition: service_healthy
     command: >
@@ -66,16 +195,17 @@ services:
       --concurrency=2
       --pool=solo
 
-  # ── Celery beat (scheduler) ────────────────────────────────
+  # ── Celery beat ────────────────────────────────────────────
   beat:
     build: ./backend
     restart: unless-stopped
     env_file: ./backend/.env
     environment:
+      - DATABASE_URL=postgresql+psycopg://postgres:postgres@db:5432/chatversio
       - REDIS_URL=redis://redis:6379/0
-    # volumes:
-    #   - db_data:/srv/data
     depends_on:
+      db:
+        condition: service_healthy
       redis:
         condition: service_healthy
     command: celery -A app.celery_app.celery beat --loglevel=info
@@ -91,4 +221,4 @@ services:
         condition: service_healthy
 
 volumes:
-  db_data:
+  pgdata:

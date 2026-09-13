@@ -17,6 +17,8 @@ dnspython>=2.6,<3.0
 bcrypt>=4.0,<5.0
 pypdf>=5.0,<6.0
 python-docx>=1.1,<2.0
+psycopg[binary]>=3.1,<4.0
+cryptography>=42,<46
 # NOTE: 'cryptography' (AES-GCM key encryption) is intentionally NOT listed
 # here — it's optional. app/services/keys.py already falls back to plaintext
 # storage if it isn't installed, so leaving it out guarantees this file

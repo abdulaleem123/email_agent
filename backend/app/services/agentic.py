@@ -1,17 +1,11 @@
 """Agentic INBOUND replies via native OpenAI function-calling (tool loop).
 
-Why native tools and not LangChain/MCP: for this one job — answer from the
-agent's own knowledge base and, on real interest, hand over a weekend booking
-link — a native function-calling loop is lighter, has no extra runtime deps,
-and is easy to reason about. The tools below are plain Python; swapping in a
-LangChain/MCP toolbelt later only means re-registering the same callables.
-
-Rules honoured here:
-- Inbound NEVER uses Tavily (research is outbound-only).
-- Answers come from the per-agent knowledge base first (kb_search tool).
-- The meeting link is the agent's own Calendly/Meet/Zoom URL, offered for
-  WEEKEND slots only, and only when the prospect shows genuine interest.
-- Output stays short, human, non-AI-sounding.
+Rules:
+- KB first (kb_search). Optional light research if lead has no company_research.
+- Scenario intelligence (not interested, price, demo, etc.).
+- Short or medium only. Human. Professional.
+- NEVER paste Calendly/Meet/Zoom URLs — say you will share a meeting link shortly.
+- No emojis, no decorative hyphens/dashes, no bullet lists.
 """
 import json
 from sqlalchemy.orm import Session
@@ -25,7 +19,8 @@ from .scenario_detector import detect_scenario, build_scenario_instruction
 
 
 def _tools(agent: models.Agent):
-    specs = [{
+    # KB only — no get_meeting_link (never paste real URLs)
+    return [{
         "type": "function",
         "function": {
             "name": "kb_search",
@@ -33,24 +28,16 @@ def _tools(agent: models.Agent):
                            "the prospect. Always use before answering a question.",
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string",
-                               "description": "what to look up"}},
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "what to look up",
+                    }
+                },
                 "required": ["query"],
             },
         },
     }]
-    if agent.meeting_url:
-        specs.append({
-            "type": "function",
-            "function": {
-                "name": "get_meeting_link",
-                "description": "Return the agent's booking link. Call ONLY when the "
-                               "prospect shows real interest in a call/demo/pricing. "
-                               "Weekend (Sat/Sun) slots only.",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        })
-    return specs
 
 
 def _run_tool(db: Session, agent: models.Agent, name: str, args: dict) -> str:
@@ -58,15 +45,16 @@ def _run_tool(db: Session, agent: models.Agent, name: str, args: dict) -> str:
         hits = embeddings.search(db, agent.id, args.get("query", ""), k=4)
         return "\n\n".join(hits) if hits else "No matching knowledge found."
     if name == "get_meeting_link":
-        return (f"{agent.meeting_url} (offer WEEKEND slots only — Saturday or Sunday)"
-                if agent.meeting_url else "No meeting link configured.")
+        return (
+            "Do not paste a link. Write: I will share a meeting link with you "
+            "shortly so we can discuss."
+        )
     return "Unknown tool."
 
 
 def generate_reply_agentic(db: Session, lead: models.Lead,
                            agent: models.Agent) -> tuple[str, str]:
-    """Returns (subject, body). Falls back to the plain generator on any error
-    or when OpenAI isn't the provider / key missing."""
+    """Returns (subject, body). Falls back to plain generator on error."""
     key = keysvc.openai_key(db)
     if settings.LLM_PROVIDER.lower() != "openai" or not key:
         from .llm import generate_email
@@ -76,40 +64,77 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
     from openai import OpenAI
     client = OpenAI(api_key=key)
 
-    # Detect prospect's scenario from the last inbound message
+    # Light DuckDuckGo if we have no stored research
+    if not (lead.company_research or "").strip() and (lead.company or lead.website or lead.email):
+        try:
+            from . import tavily
+            research, pains = tavily.research_lead(
+                lead.company, lead.name, lead.website, lead.country,
+                db=db, lead_email=lead.email,
+            )
+            if research:
+                lead.company_research = research
+                lead.pain_points = pains or lead.pain_points
+                db.commit()
+        except Exception:
+            pass
+
+    length = agent.message_length.value if hasattr(agent.message_length, "value") else (agent.message_length or "short")
+    if str(length).lower() not in ("short", "medium"):
+        length = "medium"
+
     last_inbound = next(
         (m.body for m in reversed(lead.messages or []) if m.direction == "in" and not m.is_spam),
         ""
     )
     scenario = detect_scenario(last_inbound)
-    scenario_block = build_scenario_instruction(scenario, agent.name, lead.name or "the prospect")
+    scenario_block = build_scenario_instruction(
+        scenario, agent.name, lead.name or "the prospect"
+    )
 
-    system = (_persona_for(agent) + "\n\n" + BASE_RULES + "\n\n"
-              "You are handling an INBOUND reply. Keep it SHORT, clear, human.\n\n"
-              f"── SCENARIO INTELLIGENCE ──\n{scenario_block}\n\n"
-              f"MARKET PSYCHOLOGY:\n{country_style(lead.country)}\n\n"
-              + (MEETING_DAYS_RULE if agent.meeting_url else "")
-              + "\n\nFinish with a final message. Format: first line 'Subject: ...', "
-              "blank line, then the body.")
+    system = (
+        _persona_for(agent) + "\n\n" + BASE_RULES + "\n\n"
+        "You are handling an INBOUND reply. Keep it SHORT or MEDIUM only. Human. Professional.\n"
+        "Answer from knowledge base. Use scenario intelligence. No sales dump.\n"
+        "If not interested: respect it. We have no problem with that. We only solve real problems.\n"
+        "If they want to talk: say you will share a meeting link shortly. NEVER paste a URL.\n"
+        "STRICT: no emojis, no hyphens as decoration, no bullet lists, no long essays.\n"
+        f"Length target: {length}.\n\n"
+        f"── SCENARIO INTELLIGENCE ──\n{scenario_block}\n\n"
+        f"MARKET PSYCHOLOGY:\n{country_style(lead.country)}\n\n"
+        f"COMPANY RESEARCH (if any):\n{(lead.company_research or 'none')[:1200]}\n\n"
+        + MEETING_DAYS_RULE
+        + "\n\nFinish with a final message. Format: first line 'Subject: ...', "
+          "blank line, then the body. Sign with Best regards and the agent name."
+    )
 
-    convo = [{"role": "system", "content": system},
-             {"role": "user", "content": "THREAD SO FAR:\n" + (_thread_history(lead) or "(new)")}]
+    convo = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": "THREAD SO FAR:\n" + (_thread_history(lead) or "(new)")},
+    ]
     tools = _tools(agent)
 
     tot_in = tot_out = 0
     final_text = ""
-    for _ in range(4):                      # bounded tool loop
+    for _ in range(4):
         resp = client.chat.completions.create(
-            model=settings.OPENAI_MODEL, max_tokens=700,
-            messages=convo, tools=tools, tool_choice="auto")
+            model=settings.OPENAI_MODEL,
+            max_tokens=450,
+            messages=convo,
+            tools=tools,
+            tool_choice="auto",
+        )
         u = getattr(resp, "usage", None)
         if u:
             tot_in += u.prompt_tokens or 0
             tot_out += u.completion_tokens or 0
         msg = resp.choices[0].message
         if msg.tool_calls:
-            convo.append({"role": "assistant", "content": msg.content or "",
-                          "tool_calls": [tc.model_dump() for tc in msg.tool_calls]})
+            convo.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
+            })
             for tc in msg.tool_calls:
                 try:
                     args = json.loads(tc.function.arguments or "{}")

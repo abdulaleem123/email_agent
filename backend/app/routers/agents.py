@@ -66,12 +66,41 @@ def toggle_agent(agent_id: int, request: Request, db: Session = Depends(get_db),
 
 @router.delete("/{agent_id}", status_code=204)
 def delete_agent(agent_id: int, db: Session = Depends(get_db)):
+    """Delete an agent after clearing all FK references."""
     agent = db.get(models.Agent, agent_id)
-    if agent:
-        db.query(models.Lead).filter(models.Lead.agent_id == agent_id)\
-          .update({models.Lead.agent_id: None})
-        db.delete(agent)
-        db.commit()
+    if not agent:
+        return
+
+    # Block if campaigns still exist (agent_id is NOT NULL there)
+    camp_count = db.query(models.Campaign).filter(models.Campaign.agent_id == agent_id).count()
+    if camp_count:
+        raise HTTPException(
+            400,
+            f"Cannot delete: agent still owns {camp_count} campaign(s). "
+            "Delete or re-assign those campaigns first."
+        )
+
+    # Null-out all nullable FKs so delete succeeds
+    db.query(models.Lead).filter(models.Lead.agent_id == agent_id)\
+      .update({models.Lead.agent_id: None})
+    db.query(models.EmailMessage).filter(models.EmailMessage.agent_id == agent_id)\
+      .update({models.EmailMessage.agent_id: None})
+    db.query(models.Template).filter(models.Template.agent_id == agent_id)\
+      .update({models.Template.agent_id: None})
+    db.query(models.KnowledgeDoc).filter(models.KnowledgeDoc.agent_id == agent_id)\
+      .update({models.KnowledgeDoc.agent_id: None})
+    db.query(models.KbChunk).filter(models.KbChunk.agent_id == agent_id)\
+      .update({models.KbChunk.agent_id: None})
+    db.query(models.Notification).filter(models.Notification.agent_id == agent_id)\
+      .update({models.Notification.agent_id: None})
+    db.query(models.ApiUsage).filter(models.ApiUsage.agent_id == agent_id)\
+      .update({models.ApiUsage.agent_id: None})
+    if hasattr(models, "PitchRecord"):
+        db.query(models.PitchRecord).filter(models.PitchRecord.agent_id == agent_id)\
+          .update({models.PitchRecord.agent_id: None})
+
+    db.delete(agent)
+    db.commit()
 
 
 class MailboxTestIn(BaseModel):

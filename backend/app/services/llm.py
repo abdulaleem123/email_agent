@@ -92,11 +92,12 @@ def country_style(country: str) -> str:
     return REGION_PLAYBOOKS[region]
 
 
-# ---- meeting scheduling rule (Calendly) ------------------------------------
+# ---- meeting scheduling rule (Calendly) ------------------------------------ 
 MEETING_DAYS_RULE = (
-    "When proposing meeting times or sending the Calendly link, offer WEEKEND "
-    "slots only — Saturday or Sunday. Never propose Monday-Friday times. "
-    "Phrase it naturally, e.g. 'grab any Saturday or Sunday slot that suits you'."
+    "NEVER paste a Calendly, Zoom, Meet, or any meeting URL in the email body. "
+    "If a conversation or call makes sense, say naturally: "
+    "I will share a meeting link with you shortly so we can discuss. "
+    "Do not invent or hardcode any link."
 )
 
 
@@ -117,12 +118,10 @@ Branch on the research's "AI ADOPTION SIGNALS" section:
 3. Create a CURIOSITY GAP: give just enough insight to prove you understand their
    business ("hum samajh rahe hain" energy), but hold the full "how" for the
    meeting — the reader should feel the meeting is where their answer lives.
-4. The meeting IS the product of this email. Make it feel like value, not a pitch:
-   they leave with a clear picture of the fix whether or not they buy.
-5. STRICTLY SHORT: a few tight sentences. The client must be able to read it in
-   one glance. Long emails lose them. Engaging > exhaustive.
-6. Close with the meeting link (weekend slots only) and a simple
-   "Best regards," + agent name/signature. Zero fluff after the CTA."""
+4. The conversation is the goal, not a hard pitch. Show you understand one real problem.
+5. STRICTLY SHORT or MEDIUM only. Never long. Reader must finish in one glance.
+6. NEVER put a meeting URL in the body. If relevant say you will share a meeting link shortly.
+7. Close with Best regards, then the agent name or signature. No emojis. No dashes or hyphens as decoration."""
 
 SALES_COMPETITIVE_LIGHT = """SALES AWARENESS (light touch):
 Check the research's "AI ADOPTION SIGNALS": if they lack AI, mention the concrete
@@ -457,24 +456,28 @@ def distill_pain_points(company: str, country: str, research: str, raw: str,
 
 
 def _humanize(text: str) -> str:
-    import re
+    """Strip AI tells: emojis, decorative dashes/hyphens, bullet hyphens."""
     if not text:
         return text
-    # Remove markdown horizontal rules on their own line
-    text = re.sub(r"(?m)^\s*[-*]{3,}\s*$", "", text)
-    # ' — ' or ' – ' clause separator -> ', '
-    text = re.sub(r"\s+[\u2014\u2013]\s+", ", ", text)
-    # Any remaining long dash -> remove (not replace with hyphen)
-    text = text.replace("\u2014", "").replace("\u2013", "")
-    # '--' -> remove
-    text = re.sub(r"-{2,}", "", text)
-    # Bullet-point hyphens at line start: "- item" -> "item"
-    text = re.sub(r"(?m)^\s*-\s+", "", text)
-    # Markdown bold/italic
-    text = text.replace("**", "").replace("__", "").replace("*", "")
-    # Collapse 3+ blank lines to 2
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    # Double spaces
+    import re
+    # Remove emojis / symbols
+    text = re.sub(
+        r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF\U0001FA00-\U0001FAFF]",
+        "",
+        text,
+    )
+    # Em/en dashes and fancy dashes -> space or remove
+    text = text.replace("\u2014", " ").replace("\u2013", " ").replace("—", " ").replace("–", " ")
+    text = text.replace("--", " ")
+    # Decorative " - " mid sentence stays as words; strip leading list hyphens
+    lines = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            line = stripped[2:]
+        lines.append(line)
+    text = "\n".join(lines)
+    # Collapse odd spaces
     text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
 
@@ -498,24 +501,35 @@ def generate_email(db: Session, lead: models.Lead, agent: models.Agent,
 
     tone = agent.tone.value if hasattr(agent.tone, "value") else agent.tone
     length = agent.message_length.value if hasattr(agent.message_length, "value") else agent.message_length
+    # short | medium only — long is not allowed for outbound/inbound
+    if str(length).lower() not in ("short", "medium"):
+        length = "medium" 
 
     purpose_rules = {
         "initial": f"""This is the FIRST outreach. Strategy: {strategy}.
-Apply the sales-competitive strategy: branch on the AI ADOPTION SIGNALS in the
-research (no AI -> pain + agentic-AI fix; AI present -> concrete gap + sales-growth
-upgrade). Anchor on ONE pain, build the curiosity gap, and offer a free 30-minute
-consultation/strategy session framed as value ("not a sales presentation — you'll
-leave with actionable insights either way"). One soft CTA — weekend slot if a
-meeting link exists. KEEP IT SHORT: the reader must get it in one glance.""",
-        "reply": """This is a REPLY to their inbound message. STRICT RULES:
-- Answer ONLY from the AGENT KNOWLEDGE BASE above. If KB has no answer, say so honestly in one line.
-- Do NOT re-pitch. Do NOT introduce yourself again. Do NOT mention the company or product unless they asked.
-- Match their tone and length exactly. Short reply = short answer.
-- If they ask about pricing, services, or capabilities: answer from the KB only. If KB is silent on their question, say "I don't have that detail to hand, but happy to cover it in our call."
-- If they show ANY interest in a call/meeting: give the meeting link directly (weekend slots only).
-- Maximum 5 sentences. Plain text. No bullet points. No hyphens.""",
-        "followup": """This is a gentle FOLLOW-UP after silence. 2-4 sentences max.
-New angle or small extra value — never "just following up" alone. Plain text.""",
+Use DuckDuckGo research then KB. Branch on AI adoption signals:
+- No real AI/automation: anchor on ONE concrete operational pain; position a practical fix.
+- Already has AI: one concrete gap (not a generic upgrade pitch).
+Build a short curiosity gap: enough to prove you understand them, not a full pitch.
+Not a sales or marketing blast. Subject must not sound salesy.
+Short or medium only. One soft question: is a short conversation useful?
+If yes makes sense, say you will share a meeting link shortly. NEVER paste any URL.
+If no clear pain: be honest, light touch only, no forced problem.
+No hyphens, no emojis, no bullet lists. Close with Best regards and the agent name.""",
+                "reply": """This is a REPLY to their inbound message. STRICT RULES:
+- Answer from AGENT KNOWLEDGE BASE first. If KB has no answer, one honest line.
+- Use scenario strategy (not interested, price, already have solution, etc.).
+- If not interested: respect it. Say we have no problem with that. We only want to solve a real problem if there is one. Do not push.
+- If price: do not discount blindly. Offer smaller scope or phased start. Premium positioning.
+- If interested in talking: say you will share a meeting link shortly. NEVER paste a real URL.
+- Short or medium only. Maximum about 5 to 8 short sentences.
+- Plain text. No bullet points. No hyphens. No emojis. No dashes used as decoration.
+- Professional close: Best regards, then name.""",
+                "followup": """This is a FOLLOW-UP after silence. Honour FOLLOW-UP SEQUENCE in BASE_RULES by number.
+FOLLOWUP_NUMBER is in the campaign goal when present.
+After follow-up 3 the sequence ends — no further outbound to this lead.
+2-4 sentences max. Plain text. No hyphens, no emojis, no meeting URL.
+If relevant say you will share a meeting link shortly.""",
     }[purpose]
 
     context = f"""AGENT
@@ -523,7 +537,7 @@ Name (sign with this): {agent.name}
 Role: {agent.role or 'n/a'}
 Tone: {tone} | Length: {LENGTH_GUIDE[length]}
 Portfolio/URL: {agent.project_url or 'none'}
-Meeting link (Calendly): {agent.meeting_url or 'none'}
+Meeting link: do not paste any URL. Say you will share a meeting link shortly if needed.
 Signature block (use under 'Best regards,'):
 {agent.signature or agent.name}
 
@@ -560,7 +574,7 @@ TASK — {purpose_rules}"""
     playbook = SALES_COMPETITIVE_PLAYBOOK if is_sales_led else SALES_COMPETITIVE_LIGHT
     system = (_persona_for(agent) + "\n\n" + BASE_RULES
               + "\n\n" + playbook
-              + ("\n\n" + MEETING_DAYS_RULE if agent.meeting_url else ""))
+              + "\n\n" + MEETING_DAYS_RULE)
     # Give initial emails slightly more tokens — they need the research absorbed
     max_tok = 1100 if purpose == "initial" else 900
     text = _call_llm(system, context, max_tokens=max_tok, db=db, agent_id=agent.id)
