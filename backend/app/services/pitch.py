@@ -21,8 +21,9 @@ Every LLM call is recorded in ApiUsage for the Super Admin page.
 """
 
 import logging
+import re
 from sqlalchemy.orm import Session
-
+from .scenario_detector import detect_pitch_scenario, pitch_strategy_for
 from ..config import settings
 from .. import models
 from . import keys as keysvc
@@ -196,17 +197,22 @@ Never force a sale. If there is no genuine problem we can solve, say so honestly
    can naturally reference it ("I had a look at your site…") so the prospect feels the
    research is real. Do not invent a logo or fake screenshot.
 
-7. OBJECTIONS: Handle naturally. "Not interested" → soft question to understand why, then
-   accept and leave gracefully if still no. Price → adjust scope, not quality. Never push.
+7. CONVERSATION SCENARIO (mandatory — follow the injected SCENARIO STRATEGY block):
+   Adapt the entire dialogue to that scenario (cold vs inbound call, not interested,
+   price, already have solution, demo, proof, etc.). Do NOT use one generic sales script.
+   Price/cheaper-competitor: never race to the bottom; reduce scope or show working mockup.
+   Not interested: understand once, then exit politely if still no.
 
-8. SOFT CLOSE OR HONEST EXIT:
-   - If relevant: invite a short 20–30 min strategy chat (no hard close).
-   - If not relevant: thank them and end cleanly. Never invent a booking.
+8. DEMO-FIRST: When the problem is real, the agent should prefer:
+   "I can put together a small working example/mockup for your situation and email it —
+    you review it first; if useful we do a short meeting; if not, no problem."
+   Meeting is secondary to a concrete artifact.
 
 9. NOT AI-SOUNDING: No bullet answers, no "as an AI", no corporate brochure voice.
 
 OUTPUT FORMAT (exact — no deviations):
-SUMMARY: <2-3 sentences on how the call went, whether there was a real problem, and the outcome>
+SUMMARY: <2-3 sentences: scenario, whether a real problem existed, outcome>
+MOCKUP: <if relevant: 5-10 lines describing a concrete mockup/demo concept for THIS prospect's workflow, grounded in research; if not relevant write "none">
 ---
 {agent}: ...
 {lead_name}: ...
@@ -234,6 +240,7 @@ Rules:
 
 OUTPUT FORMAT:
 SUMMARY: <2-3 sentences matching exactly what the notes describe>
+MOCKUP: <5-10 line mockup concept for this prospect if relevant, else "none">
 ---
 {agent}: ...
 {lead_name}: ...
@@ -241,17 +248,18 @@ SUMMARY: <2-3 sentences matching exactly what the notes describe>
 
 
 def _parse_transcript(text: str) -> tuple[str, str]:
-    """Split LLM output into (summary, transcript)."""
+    """Split LLM output into (summary_with_mockup, transcript)."""
     summary, transcript = "", text
     if "---" in text:
         head, _, body = text.partition("---")
-        summary    = head.replace("SUMMARY:", "").strip()
+        summary = head.strip()
         transcript = body.strip()
     elif text.upper().startswith("SUMMARY:"):
         first, _, rest = text.partition("\n")
-        summary    = first.split(":", 1)[1].strip()
+        summary = first.split(":", 1)[1].strip()
         transcript = rest.strip()
-    return summary[:1200], transcript
+    summary = summary.replace("SUMMARY:", "").strip()
+    return summary[:2500], transcript
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -315,6 +323,9 @@ def generate_pitch(
         db=db, agent_id=agent.id,
     )
 
+    pitch_sc = detect_pitch_scenario(None, inbound_call=False)
+    strategy = pitch_strategy_for(pitch_sc.code)
+    
     # ── Step 3: Full transcript (GPT-4o-mini) ─────────────────────────────────
     lead_name = lead.name or "the prospect"
 
@@ -331,7 +342,10 @@ def generate_pitch(
         )
     )
 
-    context = f"""SCENARIO BRIEF (extracted from live web research — use this as your call guide):
+    context = f"""SCENARIO STRATEGY ({pitch_sc.code}):
+{strategy}
+
+SCENARIO BRIEF (extracted from live web research — use this as your call guide):
 {scenario_brief}
 
 LEAD
@@ -352,9 +366,11 @@ AGENT KNOWLEDGE BASE (what Chatversio AI sells):
 {_knowledge_context(db, agent.id) or 'none'}
 
 IMPORTANT:
+- Follow SCENARIO STRATEGY for the whole dialogue.
 - If PRIMARY_PAIN is "NO CLEAR PAIN…", do NOT invent a problem. Be honest and offer only a light enhancement/upgrade if it makes sense, otherwise end politely.
 - You may naturally mention their website if it helps show you researched them.
 - Sound like a human consultant, not a sales script.
+- Include MOCKUP line in the output when a concrete demo concept applies.
 Now write the full transcript. Anchor every claim in the SCENARIO BRIEF above.
 Do NOT use any claim not supported by the research."""
 
@@ -397,6 +413,11 @@ def generate_pickup_transcript(
         lead.company, lead.country, research, pains,
         db=db, agent_id=agent.id,
     )
+    
+    notes = (call_notes or "").strip()
+    inbound = bool(re.search(r"\b(they|he|she|client)\s+called\b|\binbound\b", notes, re.I))
+    pitch_sc = detect_pitch_scenario(notes, inbound_call=inbound)
+    strategy = pitch_strategy_for(pitch_sc.code)
 
     lead_name = lead.name or "the prospect"
 
@@ -409,6 +430,10 @@ def generate_pickup_transcript(
 
     context = f"""AGENT NOTES (what actually happened — match this exactly):
 {call_notes}
+
+SCENARIO DETECTED: {pitch_sc.label} ({pitch_sc.code})
+SCENARIO STRATEGY:
+{strategy}
 
 SCENARIO BRIEF (use where consistent with the notes):
 {scenario_brief}
@@ -424,7 +449,8 @@ REGION PROFILE:
 RESEARCH:
 {research[:2500] or 'none'}
 
-Write the transcript now. The outcome MUST match the agent notes above."""
+Write the transcript now. The outcome MUST match the agent notes above.
+Include MOCKUP line when a concrete demo concept applies."""
 
     text = _call_pitch_llm(
         system, context, max_tokens=1600, db=db, agent_id=agent.id
@@ -460,6 +486,9 @@ def ask_about_lead(
         lead.company, lead.country, research, pains,
         db=db, agent_id=agent.id,
     ) if research else ""
+    
+    sc = detect_pitch_scenario(question)
+    strategy = pitch_strategy_for(sc.code)
 
     system = ASK_SYSTEM.format(
         agent=agent.name,
@@ -468,6 +497,7 @@ def ask_about_lead(
     )
 
     context = (
+        f"ACTIVE SCENARIO STRATEGY ({sc.code}):\n{strategy}\n\n"
         f"SCENARIO BRIEF:\n{scenario_brief}\n\n"
         f"LEAD: {lead.name or 'unknown'} at {lead.company or 'unknown'} ({lead.country or 'unknown'})\n"
         f"RESEARCH: {research[:1800]}\n"

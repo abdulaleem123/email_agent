@@ -115,6 +115,50 @@ SCENARIOS: dict[str, Scenario] = {
         kb_needed=True,
         offer_meeting=False,
     ),
+    
+    
+        "inbound_call": Scenario(
+        code="inbound_call", label="Prospect Called Us",
+        tone="receptive, diagnostic, not outbound-salesy",
+        goal="They initiated. Ask what they are trying to solve before explaining what we do. Offer mockup by email if relevant.",
+        kb_needed=True, offer_meeting=True,
+    ),
+    "why_contacting": Scenario(
+        code="why_contacting", label="Why Are You Contacting Me?",
+        tone="transparent, brief, research-backed",
+        goal="One specific research-based reason. No generic pitch. Confirm if the problem is real for them.",
+        kb_needed=False, offer_meeting=False,
+    ),
+    "what_do_you_do": Scenario(
+        code="what_do_you_do", label="What Exactly Do You Do?",
+        tone="plain, concrete, problem-first",
+        goal="We build working systems around their workflow — not resell tools. Tie to their pain if known.",
+        kb_needed=True, offer_meeting=False,
+    ),
+    "wants_proof": Scenario(
+        code="wants_proof", label="Wants Proof",
+        tone="evidence-led, calm",
+        goal="Offer a working mockup/example for THEIR situation by email — not generic claims.",
+        kb_needed=True, offer_meeting=True,
+    ),
+    "how_it_works": Scenario(
+        code="how_it_works", label="How Would It Work?",
+        tone="practical, step-by-step",
+        goal="Describe a concrete flow for their business. Offer mockup by email before a meeting.",
+        kb_needed=True, offer_meeting=True,
+    ),
+    "cheaper_competitor": Scenario(
+        code="cheaper_competitor", label="Cheaper Competitor",
+        tone="premium, non-defensive",
+        goal="Differentiate on customization, ownership, implementation, working prototype — not price war.",
+        kb_needed=True, offer_meeting=True,
+    ),
+    "cold_outreach": Scenario(
+        code="cold_outreach", label="Cold Outreach",
+        tone="curious consultant, not pushy",
+        goal="Research-based opening. Validate one real problem. Demo-first: offer mockup by email before meeting.",
+        kb_needed=True, offer_meeting=True,
+    ),
 }
 
 
@@ -169,6 +213,34 @@ _PATTERNS: list[tuple[str, list[str]]] = [
         r"\bhow does\b", r"\bwhat (is|are|does)\b", r"\bcan (it|you)\b",
         r"\bdo you (have|offer|support)\b", r"\bwhat('s| is) the (difference|price|cost|benefit)\b",
         r"\bwill it\b", r"\bintegrat\b",
+    ]),
+    
+    
+        # --- Pitch Decker / call-note scenarios (extra) ---
+    ("inbound_call", [
+        r"\b(they|he|she|client|prospect) (called|called in|phoned|rang)\b",
+        r"\binbound call\b", r"\bthey called us\b", r"\bpicked up (our|the) (phone|call)\b",
+        r"\bcalled (our|the) (office|company|number)\b",
+    ]),
+    ("why_contacting", [
+        r"\bwhy (are you|did you) (calling|contacting|reaching)\b",
+        r"\bhow did you (get|find) (my|our)\b", r"\bwhere did you get (my|this)\b",
+    ]),
+    ("what_do_you_do", [
+        r"\bwhat (exactly )?do you (do|offer|build|sell)\b",
+        r"\bwhat is (it|this|your (product|service|company))\b",
+    ]),
+    ("wants_proof", [
+        r"\bproof\b", r"\bcase stud(y|ies)\b", r"\bresults?\b", r"\broi\b",
+        r"\bexamples?\b", r"\breferences?\b", r"\bsuccess stor",
+    ]),
+    ("how_it_works", [
+        r"\bhow (would|does|will) (it|this|that) work\b",
+        r"\bhow (do|would) you (implement|build|integrate)\b",
+    ]),
+    ("cheaper_competitor", [
+        r"\bcheaper\b", r"\bloss expensive\b", r"\banother (company|vendor|agency).{0,40}(cheaper|less)\b",
+        r"\bcompetitor\b", r"\bsomeone else (offers|quoted)\b",
     ]),
 ]
 
@@ -262,3 +334,92 @@ def build_scenario_instruction(scenario: Scenario, agent_name: str, lead_name: s
         ]
 
     return "\n".join(lines)
+
+
+# ── Pitch Decker scenario strategies (call transcript generation) ─────────────
+
+PITCH_STRATEGY: dict[str, str] = {
+    "cold_outreach": (
+        "COLD OUTREACH: Open with one specific research observation. State you are not "
+        "calling with a generic AI pitch. Validate whether PRIMARY_PAIN is real. "
+        "If yes → propose a concrete mockup emailed for them to review before any meeting. "
+        "If no → honest exit."
+    ),
+    "inbound_call": (
+        "THEY CALLED YOU: Do not sound like cold outbound. First ask what they are trying "
+        "to solve. Only then explain you build working systems (not resell tools). "
+        "Offer mockup by email; meeting only if they want."
+    ),
+    "not_interested": (
+        "NOT INTERESTED: Do not keep selling. Ask once: problem not relevant, or already "
+        "have a solution? If still no → thank them and end. No pressure."
+    ),
+    "already_have": (
+        "ALREADY HAVE A SOLUTION: Curious, not confrontational. One sharp question about "
+        "a gap (integration, ownership, edge cases). Do not trash their vendor."
+    ),
+    "price_too_high": (
+        "PRICE TOO HIGH: Do NOT discount first. Ask: budget limit or value unclear? "
+        "Offer smaller scope / phased start. Preserve premium quality."
+    ),
+    "wants_discount": (
+        "WANTS LOWER PRICE: Same as price — reduce scope/phases, not quality. "
+        "No blind discount."
+    ),
+    "cheaper_competitor": (
+        "CHEAPER COMPETITOR: We may not be cheapest by design. Differentiate: custom "
+        "workflow, ownership, implementation, working prototype, outcome. Offer to show "
+        "the difference with a mockup before they decide."
+    ),
+    "wants_demo": (
+        "WANTS DEMO: Prefer mockup/example emailed first so they review asynchronously, "
+        "then short meeting if useful."
+    ),
+    "wants_proof": (
+        "WANTS PROOF: No vague claims. Offer a scenario-specific mockup grounded in research."
+    ),
+    "how_it_works": (
+        "HOW IT WORKS: Concrete steps for THEIR workflow from research. Then offer mockup by email."
+    ),
+    "why_contacting": (
+        "WHY CONTACTING: One honest research-based reason. Confirm relevance. No pitch dump."
+    ),
+    "what_do_you_do": (
+        "WHAT DO YOU DO: Short — build working AI systems around real workflows, not tool resale. "
+        "Tie to their context if known."
+    ),
+    "needs_time": (
+        "NEEDS TIME: Respect fully. Agree a specific follow-up window. No push."
+    ),
+    "send_info_email": (
+        "SEND INFO BY EMAIL: Agree to send a short mockup/concept note tailored to them. "
+        "Meeting only if they ask after reviewing."
+    ),
+    "general_interest": (
+        "INTERESTED: One qualifying question, then offer mockup by email before meeting."
+    ),
+    "neutral_question": (
+        "NEUTRAL QUESTION: Answer directly from research/KB. Soft offer of mockup or short call."
+    ),
+    "unknown": (
+        "DEFAULT: Consultant discovery. Research-grounded. Problem first. Mockup before meeting when relevant."
+    ),
+}
+
+
+def pitch_strategy_for(code: str) -> str:
+    return PITCH_STRATEGY.get(code) or PITCH_STRATEGY["unknown"]
+
+
+def detect_pitch_scenario(notes_or_text: str | None = None, *, inbound_call: bool = False) -> Scenario:
+    """
+    Scenario for Pitch Decker generation.
+    - inbound_call=True → inbound_call scenario
+    - notes_or_text set → pattern match (objections, etc.)
+    - else → cold_outreach
+    """
+    if inbound_call:
+        return SCENARIOS.get("inbound_call") or SCENARIOS["unknown"]
+    if notes_or_text and notes_or_text.strip():
+        return detect_scenario(notes_or_text)
+    return SCENARIOS.get("cold_outreach") or SCENARIOS["unknown"]
