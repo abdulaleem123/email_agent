@@ -68,10 +68,11 @@ def toggle(cid: int, db: Session = Depends(get_db)):
  
  
 @router.post("/{cid}/launch")
-def launch(cid: int, lead_ids: list[int], db: Session = Depends(get_db)):
+def launch(cid: int, data: schemas.LaunchIn, db: Session = Depends(get_db)):
     """Split into batches of campaign.batch_size (20–50) and schedule each lead
     with a per-agent random 3–12 min stagger; batch N starts after batch N-1's
     window so volume ramps safely (Gmail/Outlook/Hostinger friendly)."""
+    lead_ids = data.lead_ids
     c = db.get(models.Campaign, cid)
     if not c:
         raise HTTPException(404, "Campaign not found")

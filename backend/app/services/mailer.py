@@ -433,9 +433,10 @@ def send_email(to_addr: str, subject: str, body: str,
     # opt-out line in the body (below) — a working link, just not a header
     # Gmail's UI treats as a bulk-sender signal.
     plain_body = body
-    if unsub_token:
-        unsub_url = f"{settings.PUBLIC_API_URL}/api/unsub/{unsub_token}"
-        plain_body = f"{body}\n\n---\nNo longer interested? {unsub_url}"
+    # if unsub_token:
+    #     unsub_url = f"{settings.PUBLIC_API_URL}/api/unsub/{unsub_token}"
+    #     plain_body = f"{body}\n\n---\nNo longer interested? {unsub_url}"
+    plain_body = body
     msg.attach(MIMEText(plain_body, "plain", "utf-8"))
     if use_html_template:
         msg.attach(MIMEText(render_html_template(plain_body, display), "html", "utf-8"))

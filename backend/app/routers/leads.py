@@ -50,7 +50,10 @@ def list_leads_paged(status: str | None = Query(default=None),
         qy = qy.filter(models.Lead.email_verified.is_(False))
     if pitch_pending:
         # only leads not marked done in Pitch Decker
-        qy = qy.filter(models.Lead.pitch_done.is_(False))
+        qy = qy.filter(models.Lead.pitch_done.is_(False), models.Lead.source == "pitch")
+    else:
+        # Leads outreach page — pitch uploads hide
+        qy = qy.filter(models.Lead.source != "pitch")
     if q:
         like = f"%{q.strip()}%"
         qy = qy.filter(or_(models.Lead.email.ilike(like),
@@ -159,6 +162,10 @@ def bulk_delete(data: BulkIds, request: Request, db: Session = Depends(get_db),
     # Hard delete
     db.query(models.EmailMessage).filter(models.EmailMessage.lead_id.in_(ids))\
       .delete(synchronize_session=False)
+    db.query(models.PitchRecord).filter(models.PitchRecord.lead_id.in_(ids))\
+        .delete(synchronize_session=False)
+    db.query(models.EmailMessage).filter(models.EmailMessage.lead_id.in_(ids))\
+    .delete(synchronize_session=False)
     n = db.query(models.Lead).filter(models.Lead.id.in_(ids))\
           .delete(synchronize_session=False)
     db.commit()
@@ -209,9 +216,18 @@ def leads_stats(db: Session = Depends(get_db)):
 
 
 @router.post("/upload")
-async def upload_leads(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_leads(file: UploadFile = File(...),
+                       source: str = Query(default="excel"),
+                       db: Session = Depends(get_db)):
+    """source=excel → Leads (outreach) only.
+    source=pitch → Pitch Decker only (never on Leads page)."""
     if not file.filename.lower().endswith(ALLOWED_EXT):
         raise HTTPException(400, "Only .xlsx, .xls or .csv files are allowed")
+    src = (source or "excel").strip().lower()
+    if src not in ("excel", "pitch", "csv", "manual"):
+        src = "excel"
+    if src == "csv":
+        src = "excel"
     raw = await file.read()
     if len(raw) > MAX_UPLOAD:
         raise HTTPException(400, "File too large (max 5 MB)")
@@ -225,16 +241,14 @@ async def upload_leads(file: UploadFile = File(...), db: Session = Depends(get_d
         if db.query(models.Lead).filter(models.Lead.email == row["email"]).first():
             skipped += 1
             continue
-        # MX-only at upload for speed (50k+ scale) — click "Verify mailboxes"
-        # for the deeper SMTP-level check.
         ok, _reason = mailer.verify_recipient(row["email"], smtp=False)
         if not ok:
             unverified += 1
-        db.add(models.Lead(**row, source="excel", email_verified=ok))
+        db.add(models.Lead(**row, source=src, email_verified=ok))
         created += 1
     db.commit()
     return {"created": created, "skipped_duplicates": skipped,
-            "unverified": unverified, "parsed": len(rows)}
+            "unverified": unverified, "parsed": len(rows), "source": src}
 
 
 @router.post("/verify")
@@ -297,6 +311,17 @@ def enroll(data: schemas.EnrollIn, db: Session = Depends(get_db)):
     for lid in data.lead_ids:
         lead = db.get(models.Lead, lid)
         if not lead or lead.status not in (models.LeadStatus.new, models.LeadStatus.enrolled):
+            continue
+                # One sequence only — real outbound already exists → block re-enroll
+        prior_out = (db.query(models.EmailMessage)
+                     .filter(models.EmailMessage.lead_id == lid,
+                             models.EmailMessage.direction == "out",
+                             models.EmailMessage.is_spam.is_(False))
+                     .first())
+        if prior_out:
+            blocked.append({"lead_id": lid, "email": lead.email,
+                            "owned_by": "already contacted",
+                            "unlock_at": "after sequence closes / manual reset"})
             continue
         last_sent = (db.query(models.EmailMessage)
                      .filter(models.EmailMessage.lead_id == lid,
@@ -385,5 +410,10 @@ def toggle_ai(lead_id: int, db: Session = Depends(get_db)):
 def delete_lead(lead_id: int, db: Session = Depends(get_db)):
     lead = db.get(models.Lead, lead_id)
     if lead:
+        db.query(models.TemplateUse).filter(models.TemplateUse.lead_id == lead_id)\
+          .delete(synchronize_session=False)
+        db.query(models.PitchRecord).filter(models.PitchRecord.lead_id == lead_id)\
+          .delete(synchronize_session=False)
+        # cascade already handles messages
         db.delete(lead)
         db.commit()

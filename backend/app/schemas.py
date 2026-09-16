@@ -43,6 +43,10 @@ class AgentBase(BaseModel):
         return v
  
  
+class LaunchIn(BaseModel):
+    """Body for POST /api/campaigns/{cid}/launch — frontend always sends {lead_ids: [...]}."""
+    lead_ids: List[int] 
+ 
 class AgentCreate(AgentBase):
     pass
  

@@ -108,12 +108,13 @@ export const api = {
   leads: (params) => request(`/api/leads${qs(params)}`),
   leadsPaged: (params) => request(`/api/leads/paged${qs(params)}`),
   leadsStats: () => request('/api/leads/stats'),
-  uploadLeads: (file, agentId, campaignId) => {
+  uploadLeads: (file, agentId, campaignId, source = 'excel') => {
     const fd = new FormData()
     fd.append('file', file)
     if (agentId) fd.append('agent_id', agentId)
     if (campaignId) fd.append('campaign_id', campaignId)
-    return request('/api/leads/upload', { method: 'POST', body: fd })
+    const src = source === 'pitch' ? 'pitch' : 'excel'
+    return request(`/api/leads/upload?source=${src}`, { method: 'POST', body: fd })
   },
   enroll: (leadIds, campaignId, agentId) =>
     request('/api/leads/enroll', {
