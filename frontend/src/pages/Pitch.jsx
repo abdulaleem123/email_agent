@@ -90,11 +90,11 @@ export default function Pitch() {
     return () => clearTimeout(t)
   }, [pitch?.id, busy, callBusy])
 
-  const select = async (lead) => {
-    setOpen(lead); setPitch(null); setQa([]); setCallNotes('')
-    const list = await api.pitches(lead.id).catch(() => [])
-    setHistory(list)
-    if (list.length) setPitch(list[0])
+    const select = async (lead) => {
+    setOpen(lead); setPitch(null); setHistory([]); setQa([]); setCallNotes('')
+    const list = await api.pitches({ lead_id: lead.id }).catch(() => [])
+    setHistory(Array.isArray(list) ? list : [])
+    if (Array.isArray(list) && list.length) setPitch(list[0])
   }
 
   const generate = async () => {
@@ -178,6 +178,31 @@ export default function Pitch() {
       if (open && leadSel.has(open.id)) { setOpen(null); setPitch(null); setHistory([]) }
       setLeadSel(new Set())
       show('Selected leads removed')
+      loadLeads()
+    } catch (err) { show(err.message, true) }
+  }
+
+    const deleteAllPitchQueue = async () => {
+    if (!leadTotal) return
+    if (!confirm(`Delete ALL ${leadTotal} lead(s) from the Pitch Decker queue? This cannot be undone.`)) return
+    try {
+      const ids = []
+      let page = 1, pages = 1
+      while (page <= pages) {
+        const r = await api.leadsPaged(`page=${page}&per_page=200&pitch_pending=true`)
+        const items = r.items || []
+        items.forEach(l => ids.push(l.id))
+        pages = r.pages || 1
+        page += 1
+        if (!items.length) break
+      }
+      if (!ids.length) { show('Queue already empty'); return }
+      for (let i = 0; i < ids.length; i += 500) {
+        await api.bulkDeleteLeads(ids.slice(i, i + 500))
+      }
+      setLeads([]); setLeadTotal(0); setLeadSel(new Set())
+      setOpen(null); setPitch(null); setHistory([])
+      show(`Deleted ${ids.length} pitch-queue lead(s)`)
       loadLeads()
     } catch (err) { show(err.message, true) }
   }
@@ -330,15 +355,22 @@ export default function Pitch() {
             <IconUsers />
             <input placeholder="Search leads…" value={query} onChange={e => setQuery(e.target.value)} />
           </div>
-          {leadSel.size > 0 && (
-            <div className="row mb" style={{ gap: 8, padding: '0 10px', alignItems: 'center' }}>
-              <span className="sm mut">{leadSel.size} selected</span>
-              <button className="btn danger small" onClick={removeSelectedPitchLeads}>
-                <IconTrash /> Delete selected
+          <div className="row mb" style={{ gap: 8, padding: '0 10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            {leadSel.size > 0 && (
+              <>
+                <span className="sm mut">{leadSel.size} selected</span>
+                <button className="btn danger small" onClick={removeSelectedPitchLeads}>
+                  <IconTrash /> Delete selected
+                </button>
+                <button className="btn ghost small" onClick={() => setLeadSel(new Set())}>Clear</button>
+              </>
+            )}
+            {leadTotal > 0 && (
+              <button className="btn danger small" onClick={deleteAllPitchQueue} style={{ marginLeft: 'auto' }}>
+                <IconTrash /> Delete all ({leadTotal})
               </button>
-              <button className="btn ghost small" onClick={() => setLeadSel(new Set())}>Clear</button>
-            </div>
-          )}
+            )}
+          </div>
           <div className="pitch-list-scroll">
             {leads.length === 0 && <div className="empty">{leadsLoading ? 'Loading…' : 'No leads match'}</div>}
             {leads.map(l => (
