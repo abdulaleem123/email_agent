@@ -86,3 +86,12 @@ export const IconLogout = (p) => (
 export const IconShield = (p) => (
   <svg {...base} {...p}><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z" /><path d="M9 12l2 2 4-4" /></svg>
 )
+export const IconAlert = (p) => (
+  <svg {...base} {...p}><path d="M12 3.5L21 19H3l9-15.5z" /><path d="M12 9.5v4" /><circle cx="12" cy="16.4" r="0.9" fill="currentColor" stroke="none" /></svg>
+)
+export const IconFlag = (p) => (
+  <svg {...base} {...p}><path d="M5 21V4" /><path d="M5 4.5h11l-1.8 3.5L16 11.5H5" /></svg>
+)
+export const IconFlame = (p) => (
+  <svg {...base} {...p}><path d="M12 3s5 4 5 9a5 5 0 0 1-10 0c0-2 1-3.5 1-3.5S9 11 10 12c1-2 2-9 2-9z" /></svg>
+)

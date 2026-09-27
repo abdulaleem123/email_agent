@@ -13,6 +13,8 @@ import anthropic
 from sqlalchemy.orm import Session
 from ..config import settings
 from .. import models
+from . import playbook
+from . import agent_settings
 import re
 
 LENGTH_GUIDE = {
@@ -115,6 +117,9 @@ Branch on the research's "AI ADOPTION SIGNALS" section:
      language, no handoff) — show you actually looked.
    - Frame the upgrade as sales growth: better conversations convert more of the
      traffic they already pay for. Improve, not replace their judgement.
+   - When you do name what a chat agent or voice agent does, call it that, and
+     say it happens in realtime. Naming THEIR "chatbot" is fine and even useful;
+     describing OUR product that way is not.
 3. Create a CURIOSITY GAP: give just enough insight to prove you understand their
    business ("hum samajh rahe hain" energy), but hold the full "how" for the
    meeting — the reader should feel the meeting is where their answer lives.
@@ -281,7 +286,13 @@ Agency/corporate language: "we are an agency", "our team offers",
 "we would love to work with you", "we are excited to", "please do not hesitate"
 
 Technical tool names: n8n, Zapier, Make, Airtable, workflow automation,
-AI agents, AI chatbots, bots, machine learning, API integration
+machine learning, API integration
+
+HOW TO DESCRIBE US: we build CHAT AGENTS and VOICE AGENTS. Write "chat agent"
+or "voice agent", and say they run in REALTIME when the word fits. Never write
+"chatbot", "voice bot", "virtual assistant", "IVR", "AI rep" or "automated
+workflow" — those describe something cheaper and less capable than what this
+actually does, and they are the fastest way to look automated.
 
 Formatting bans: bullet points, numbered lists, bold (**), em-dashes, long dashes,
 exclamation marks, emojis, calendar links inside email body, more than one question
@@ -290,9 +301,12 @@ exclamation marks, emojis, calendar links inside email body, more than one quest
 OUTPUT FORMAT (mandatory)
 ═══════════════════════════════════════════════════════════
 
-Line 1: Subject: [4-8 words, peer-to-peer, specific to company or operational reality from research.
-Good examples: "Response time as [Company] scales", "When inbound outpaces the team",
-"Ops load after the last growth spurt". Banned starts: Noticing, Checking, Quick, Hope, Following, Just, Opportunity.]
+Line 1: Subject: [3 words max, peer-to-peer, specific to the company or
+operational reality from research.
+Good examples: "Reply backlog", "Queue strain", "Missed calls". Banned starts:
+Noticing, Checking, Quick, Hope, Following, Just, Opportunity, Circling.
+NOTE: the subject is regenerated in code from a region-aware bank, so whatever
+you write here is discarded. Spend your words on the body instead.]
 Blank line.
 Email body — Hi [FirstName], ... Regards, [Name]
 Nothing else. No commentary. No alternatives. No preamble.
@@ -310,37 +324,218 @@ LENGTH_OVERRIDE = {
     "professional": "Formal-professional register, medium length, zero slang.",
 }
 
+# How long the OPENING email is allowed to be. The user asked for an explicit
+# short / medium / long choice per campaign, so "long" is a real option here
+# even though the agent-level length is capped at short/medium.
+OPENING_LENGTH_RULES = {
+    "short": ("OPENING LENGTH = short. 3-4 sentences, one idea, no second "
+              "paragraph. Respect their inbox."),
+    "medium": ("OPENING LENGTH = medium. 5-7 sentences, at most two short "
+               "paragraphs. Still one idea, still no pitch deck."),
+    "long": ("OPENING LENGTH = long. Up to three short paragraphs, but every "
+             "paragraph must earn its place: their situation, the specific gap, "
+             "why it costs them, then one soft question. Long never means "
+             "padded, and never means a list of features."),
+}
+
+
+def _opening_length_rule(first_email_length: str) -> str:
+    key = (first_email_length or "").strip().lower()
+    return OPENING_LENGTH_RULES.get(key, LENGTH_OVERRIDE["concise"])
+
+
+def _demo_rule(offer_demo: bool) -> str:
+    """What to offer instead of a brochure. 'realtime demo' is the ask, and a
+    demo is only worth offering when there is a real reason to believe they
+    would look at it."""
+    if not offer_demo:
+        return ("DO NOT offer a demo, a trial, a call or a meeting. No next step "
+                "in this email at all. Close it and leave the door open.")
+    return ("NEXT STEP: if it fits naturally, offer a LIVE REALTIME DEMO — the "
+            "chat agent or voice agent actually talking to someone, in real "
+            "time, on their own use case. Do not offer a brochure, a deck, a "
+            "trial or a 'call to discuss'. Say you will share a link to book a "
+            "short realtime demo. Never paste a URL.")
+
+
+def _memory_rule(use_thread_memory: bool) -> str:
+    """A follow-up that ignores the thread is the clearest sign of automation.
+    MEMORY=off keeps the old behaviour, but memory is the default now."""
+    if not use_thread_memory:
+        return ("MEMORY IS OFF for this campaign: write a short standalone "
+                "follow-up without referencing earlier emails.")
+    return ("READ THE THREAD SO FAR before writing and USE IT. The sequence is "
+            "decided by what is actually in the conversation: if your earlier "
+            "email already asked a question or made a point, do not ask it again "
+            "and do not restate it. Add one new thing — a second angle, a "
+            "concrete example, a cost of the problem. NEVER write a bare "
+            "\"just following up\", \"circling back\" or \"checking in\", and never "
+            "reuse the previous subject line. Each follow-up must be readable on "
+            "its own but must also make sense as the next line in THIS "
+            "conversation.")
+
 
 def _campaign_directives(campaign) -> str:
+    """Operational rules that are NOT part of the campaign-to-agent selection
+    box (they are mechanics of the send itself). Everything the operator picks
+    in the box — offering, delivery model, ideal customer, avoid phrases,
+    platform rules, extra instructions, pricing, CTA, titles, unsubscribe,
+    subject, body, follow-ups, decline/interest handling — lives in
+    agent_settings.campaign_prompt() and is only rendered for the parts that
+    are switched on."""
     if campaign is None:
         return ""
     parts = []
     if getattr(campaign, "email_length", ""):
         parts.append("LENGTH OVERRIDE: " + LENGTH_GUIDE.get(campaign.email_length,
                                                             campaign.email_length))
-    if getattr(campaign, "target_focus", ""):
-        parts.append("PAIN FOCUS (target/country-wise — prioritise these):\n"
-                     + campaign.target_focus)
-    if getattr(campaign, "what_to_sell", ""):
-        parts.append("SELL EXACTLY THIS (what to pitch/emphasise):\n"
-                     + campaign.what_to_sell)
-    if getattr(campaign, "what_to_avoid", ""):
-        parts.append("NEVER MENTION / DO NOT SELL:\n" + campaign.what_to_avoid)
-    if getattr(campaign, "target_country", ""):
-        parts.append("MARKET OVERRIDE — write for this country's psychology:\n"
-                     + country_style(campaign.target_country))
+    if (agent_settings.is_on(campaign, "not_interested")
+            and getattr(campaign, "not_interested_action", "")):
+        parts.append("DECLINE POLICY: if they say they are not interested, the "
+                     "agent must not reply at all. The lead is marked Cold, the "
+                     "conversation stays in Messages, the lead is moved to Trash "
+                     "and deleted after "
+                     f"{getattr(campaign, 'not_interested_retention_days', 30)} days.")
+    if (getattr(campaign, "pricing_policy", "escalate") or "").lower() == "escalate":
+        parts.append("NEVER ANSWER THESE YOURSELF — price, quote, discount, "
+                     "contract, legal, compliance, data security, or who the "
+                     "company is. If asked, write one short honest line saying "
+                     "you will get the exact details confirmed and a colleague "
+                     "will come back to them, then stop. A human takes over from "
+                     "there.")
+    if not getattr(campaign, "demo_offer", True):
+        parts.append("No demo, no trial, no meeting offer in this campaign.")
     return ("\n\n" + "\n\n".join(parts)) if parts else ""
 
 
+def settings_block(campaign) -> str:
+    """The settings in force for this send.
+
+    With a campaign: only the parts of the agent that campaign's selection box
+    switched on, carrying that campaign's own values (offering, delivery model,
+    ideal customer, platform rules …). Without one: the DEFAULT AGENT PROMPT,
+    which states every setting, so replies from an unassigned thread and the
+    Agents screen preview agree with what a fresh campaign does."""
+    if campaign is None:
+        return agent_settings.default_prompt()
+    return agent_settings.campaign_prompt(campaign)
+
+
+# ── NO PRICING TALK — code backstop, not just a prompt rule ──────────────────
+_PRICING_WORDS = re.compile(
+    r"\b(?:pricing|price|prices|priced|discount|discounts|discounted|quote|"
+    r"quotes|quotation|budget|budgets|invoice|invoices|fee|fees|tariff|"
+    r"tariffs|rate card|price list)\b", re.IGNORECASE)
+_MONEY = re.compile(
+    r"[$€£¥]\s?\d[\d,.]*|"
+    r"\b\d[\d,.]+\s?(?:usd|eur|gbp|pkr|aed|sar|dollars?|euros?|pounds?)\b",
+    re.IGNORECASE)
+
+
+def has_pricing_talk(text: str) -> bool:
+    return bool(text) and bool(_PRICING_WORDS.search(text) or _MONEY.search(text))
+
+
+def strip_pricing_talk(text: str) -> str:
+    """Last resort: drop the pricing tokens rather than send them."""
+    if not text:
+        return text
+    out = _MONEY.sub(" ", text)
+    out = _PRICING_WORDS.sub(" ", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"([,;:]) +(?=[,;.!?])", r"\1", out)
+    out = re.sub(r" +([,.;:!?])", r"\1", out)
+    out = re.sub(r"\s+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def booking_link_for(campaign, agent) -> str:
+    """The CTA link: the campaign's own booking link, else the agent's."""
+    link = ((getattr(campaign, "booking_link", "") or "").strip()
+            if campaign is not None else "")
+    if not link and agent is not None:
+        link = (getattr(agent, "meeting_url", "") or "").strip()
+    return link
+
+
+def apply_cta(body: str, campaign, agent) -> str:
+    """CTA: insert the booking link under the closing line.
+
+    Code owns the link on purpose — the model is told never to paste a URL, so
+    the only way the reader ever sees a real one is if we put it there."""
+    if campaign is None or not agent_settings.is_on(campaign, "cta"):
+        return body
+    if not getattr(campaign, "cta_enabled", True):
+        return body
+    link = booking_link_for(campaign, agent)
+    if not link:
+        return body
+    if link in (body or ""):
+        return body
+    return (body or "").rstrip() + f"\n\n{link}"
+
+
+def _persona_key(agent: models.Agent) -> str:
+    """Which of the four voices this agent writes as.
+
+    The Persona field on the Agent UI wins; it falls back to the agent's own
+    name so every agent created before that field existed still gets exactly
+    the playbook it was using."""
+    chosen = (getattr(agent, "persona", "") or "").strip().lower()
+    if chosen in PERSONAS:
+        return chosen
+    return (agent.name or "").strip().lower()
+
+
 def _persona_for(agent: models.Agent) -> str:
+    key = _persona_key(agent)
     if agent.persona_prompt and agent.persona_prompt.strip():
         base = agent.persona_prompt.strip()
     else:
-        base = PERSONAS.get(agent.name.strip().lower(),
+        base = PERSONAS.get(key,
                             f"You are {agent.name}, {agent.role or 'a professional'}. "
                             f"{agent.description or ''}")
     if agent.pitch_style and agent.pitch_style.strip():
         base += f"\n\nADDITIONAL PITCH NOTES:\n{agent.pitch_style.strip()}"
+    # Intelligence layers — additive only, every one is optional. They are part
+    # of the persona/system prompt and therefore apply to BOTH outbound
+    # (generate_email: first-touch, follow-ups, fallback replies) and inbound
+    # (agentic tool-loop replies), for every agent that uses them.
+    if getattr(agent, "sentiment_prompt", "") and agent.sentiment_prompt.strip():
+        base += ("\n\n── SENTIMENT LAYER (read the other person's mood and match it "
+                 "naturally — this applies to every email you write or reply to) ──\n"
+                 + agent.sentiment_prompt.strip())
+    if getattr(agent, "country_prompt", "") and agent.country_prompt.strip():
+        base += ("\n\n── COUNTRY / REGION LAYER (communicate the way this market "
+                 "expects — formality, directness, relationship-first vs efficiency-"
+                 "first — use the lead's country from context) ──\n"
+                 + agent.country_prompt.strip())
+    if getattr(agent, "judgment_prompt", "") and agent.judgment_prompt.strip():
+        base += ("\n\n── JUDGMENT LAYER (professional judgment: when to ask a focused "
+                 "question, when to accept a decline gracefully and leave the door "
+                 "open, when to be brief — never argue, invent, or overpromise) ──\n"
+                 + agent.judgment_prompt.strip())
+    # ── targeting / offering / language layers (same for inbound + outbound) ─
+    from . import playbook, targeting
+    why_you = playbook.why_you_layer(agent)
+    if why_you:
+        base += "\n\n── WHY YOU (value, proof, outcomes) ──\n" + why_you
+    solutions = playbook.solution_layer(agent)
+    if solutions:
+        base += "\n\n" + solutions
+    target = targeting.targeting_layer(agent)
+    if target:
+        base += "\n\n── TARGETING ──\n" + target
+    avoid = playbook.avoid_layer(agent)
+    if avoid:
+        base += "\n\n── NEVER SAY ──\n" + avoid
+    base += "\n\n" + playbook.no_website_rule()
+    if getattr(agent, "extra_instructions", "") and agent.extra_instructions.strip():
+        base += ("\n\n── EXTRA INSTRUCTIONS (your own rules — they outrank anything "
+                 "above that contradicts them, but never the safety rules: no URLs, "
+                 "no banned phrases, no excluded recipients) ──\n"
+                 + agent.extra_instructions.strip())
     return base
 
 
@@ -378,13 +573,37 @@ def _kb_for_prompt(db: Session, agent_id: int, query: str,
 
 
 def _thread_history(lead: models.Lead, max_msgs: int = 12) -> str:
+    """The actual conversation, oldest first.
+
+    This is what makes a follow-up memory-based instead of generic: the model
+    can see that we already asked a question, already made a point, or already
+    offered a demo, and therefore must not repeat it. Escalation and spam rows
+    are skipped — they are not part of the conversation.
+    """
     lines = []
     for m in lead.messages[-max_msgs:]:
-        if m.is_spam:
+        if m.is_spam or m.is_escalation:
             continue
         who = "THEM" if m.direction == "in" else "US"
         lines.append(f"{who}: {m.subject}\n{m.body[:800]}")
     return "\n---\n".join(lines)
+
+
+def _thread_digest(lead: models.Lead) -> str:
+    """A short factual summary of where the thread stands, so the model is not
+    re-deriving state from a wall of text on every follow-up."""
+    msgs = [m for m in lead.messages if not m.is_spam and not m.is_escalation]
+    outs = [m for m in msgs if m.direction == "out"]
+    ins = [m for m in msgs if m.direction == "in"]
+    bits = [
+        f"{len(outs)} email(s) sent by us, {len(ins)} received.",
+        f"Follow-ups already sent: {getattr(lead, 'followups_sent', 0) or 0}.",
+    ]
+    if outs:
+        bits.append(f"Our last subject was: {outs[-1].subject!r} — do not reuse it.")
+    if ins:
+        bits.append(f"Their last message said: {(ins[-1].body or '')[:300]}")
+    return " ".join(bits)
 
 
 def _pick_unused_template(db: Session, lead: models.Lead, agent: models.Agent):
@@ -498,14 +717,24 @@ def generate_email(db: Session, lead: models.Lead, agent: models.Agent,
                    purpose: str, campaign_goal: str = "",
                    strategy: str = "B2B", use_template: bool = False,
                    record_template_use: bool = True,
-                   campaign: models.Campaign | None = None) -> tuple[str, str, int]:
+                   campaign: models.Campaign | None = None,
+                   first_email_length: str = "", offer_demo: bool = True,
+                   use_thread_memory: bool = True) -> tuple[str, str, int]:
     """purpose: initial | reply | followup. Returns (subject, body, template_id or 0).
 
     RULES enforced here:
     - Inbound replies + follow-ups are ALWAYS plain (use_template ignored).
     - Replies are short, clear, concise; answer from the agent's KB first and,
       when there's buying interest, send the meeting (Calendly) link directly.
+    - first_email_length: campaign's short/medium/long choice for the OPENING
+      email. Anything else falls back to the agent's own message_length.
+    - offer_demo: offer a live realtime demo instead of a brochure/pitch deck.
+    - use_thread_memory: follow-ups read the actual thread and build on it.
     - _humanize() runs on every output as a hard guarantee against AI giveaways.
+
+    The subject line this returns is ignored for outbound — subjects.build_subject
+    owns it now, so a 3-word, region-aware, never-repeated subject is a code
+    guarantee rather than something the model has to be trusted to do.
     """
     template = None
     if purpose == "initial" and use_template:
@@ -515,7 +744,11 @@ def generate_email(db: Session, lead: models.Lead, agent: models.Agent,
     length = agent.message_length.value if hasattr(agent.message_length, "value") else agent.message_length
     # short | medium only — long is not allowed for outbound/inbound
     if str(length).lower() not in ("short", "medium"):
-        length = "medium" 
+        length = "medium"
+    # The campaign's explicit choice for the FIRST email wins, including long.
+    opening_length = (first_email_length or "").strip().lower()
+    if purpose == "initial" and opening_length in ("short", "medium", "long"):
+        length = opening_length
 
     purpose_rules = {
         "initial": f"""This is the FIRST outreach. Strategy: {strategy}.
@@ -524,9 +757,15 @@ Use DuckDuckGo research then KB. Branch on AI adoption signals:
 - Already has AI: one concrete gap (not a generic upgrade pitch).
 Build a short curiosity gap: enough to prove you understand them, not a full pitch.
 Not a sales or marketing blast. Subject must read like a peer noting an operational reality (company or country from research), never like an ad or "Noticing..." opener.
-Short or medium only. One soft question: is a short conversation useful?
-If yes makes sense, say you will share a meeting link shortly. NEVER paste any URL.
-If no clear pain: be honest, light touch only, no forced problem.
+ONE soft question at most, and only if it is natural: is a short conversation useful?
+{_opening_length_rule(opening_length)}
+{_demo_rule(offer_demo)}
+WHAT WE BUILD — say it plainly and only where it fits:
+- We build CHAT AGENTS and VOICE AGENTS. Call them "chat agent" and "voice agent".
+- NEVER call them a chatbot, a virtual assistant, an IVR, a voice bot or an AI rep.
+- They genuinely run in realtime: they talk to the customer, answer, and hand over to a
+  person when it matters. Say "realtime" if the word fits, never "automated workflow".
+Never open with the product. Open with THEIR problem, in their language for their country.
 No hyphens, no emojis, no bullet lists. Close with Best regards and the agent name.""",
                 "reply": """This is a REPLY to their inbound message. STRICT RULES:
 - Answer from AGENT KNOWLEDGE BASE first. If KB has no answer, one honest line.
@@ -537,10 +776,11 @@ No hyphens, no emojis, no bullet lists. Close with Best regards and the agent na
 - Short or medium only. Maximum about 5 to 8 short sentences.
 - Plain text. No bullet points. No hyphens. No emojis. No dashes used as decoration.
 - Professional close: Best regards, then name.""",
-                "followup": """This is a FOLLOW-UP after silence. Honour FOLLOW-UP SEQUENCE in BASE_RULES by number.
+                "followup": f"""This is a FOLLOW-UP after silence. Honour FOLLOW-UP SEQUENCE in BASE_RULES by number.
 FOLLOWUP_NUMBER is in the campaign goal when present.
-After follow-up 3 the sequence ends — no further outbound to this lead.
+{_memory_rule(use_thread_memory)}
 2-4 sentences max. Plain text. No hyphens, no emojis, no meeting URL.
+{_demo_rule(offer_demo)}
 If relevant say you will share a meeting link shortly.""",
     }[purpose]
 
@@ -548,10 +788,16 @@ If relevant say you will share a meeting link shortly.""",
 Name (sign with this): {agent.name}
 Role: {agent.role or 'n/a'}
 Tone: {tone} | Length: {LENGTH_GUIDE[length]}
-Portfolio/URL: {agent.project_url or 'none'}
+Portfolio/URL (INTERNAL — never print this or any link in the email): {agent.project_url or 'none'}
 Meeting link: do not paste any URL. Say you will share a meeting link shortly if needed.
 Signature block (use under 'Best regards,'):
 {agent.signature or agent.name}
+
+WHO YOU ARE WRITING TO (roles this agent serves):
+{', '.join(playbook.split_items(agent.target_titles)) or 'any decision-maker — use their real title from the lead'}
+
+TARGET MARKET:
+{getattr(agent, 'target_location', '') or 'follow the lead\'s own country below'}
 
 LEAD
 Person: {lead.name or 'there'} | Title: {lead.title or 'unknown'}
@@ -577,15 +823,19 @@ CAMPAIGN GOAL:
 THREAD SO FAR:
 {_thread_history(lead) or 'No prior messages.'}
 
+WHERE THE THREAD STANDS:
+{_thread_digest(lead) if use_thread_memory else 'Memory is off for this campaign — do not reference earlier emails.'}
+
 SEED TEMPLATE (structure inspiration ONLY — rewrite fully in your voice; never copy sentences):
 {template.body if template else 'none — write fresh'}
 
 TASK — {purpose_rules}"""
 
-    is_sales_led = agent.name.strip().lower() in SALES_LED_AGENTS
-    playbook = SALES_COMPETITIVE_PLAYBOOK if is_sales_led else SALES_COMPETITIVE_LIGHT
+    is_sales_led = _persona_key(agent) in SALES_LED_AGENTS
+    competitive = SALES_COMPETITIVE_PLAYBOOK if is_sales_led else SALES_COMPETITIVE_LIGHT
     system = (_persona_for(agent) + "\n\n" + BASE_RULES
-              + "\n\n" + playbook
+              + "\n\n" + settings_block(campaign)
+              + "\n\n" + competitive
               + "\n\n" + MEETING_DAYS_RULE)
     # Give initial emails slightly more tokens — they need the research absorbed
     max_tok = 1100 if purpose == "initial" else 900
@@ -606,6 +856,43 @@ TASK — {purpose_rules}"""
     # Hard guarantee: strip AI-giveaway patterns regardless of what the LLM produced.
     # Prompt rules alone are not enough — this runs every time.
     subject, body = _humanize(subject), _humanize(body)
+    # Same guarantee for the two things the user is never allowed to see: our
+    # own website address (any URL, actually) and every avoid phrase.
+    subject = playbook.scrub(subject, agent)
+    body = playbook.scrub(body, agent)
+
+    # NO PRICING TALK — one clean rewrite when the model slipped a price in,
+    # and a token strip as the last resort. Never sent with pricing in it.
+    if (campaign is not None and agent_settings.is_on(campaign, "no_pricing")
+            and getattr(campaign, "no_pricing", True)
+            and (has_pricing_talk(subject) or has_pricing_talk(body))):
+        retry_ctx = (context + "\n\nIMPORTANT: the previous draft mentioned "
+                     "pricing, price, a discount, a quote, a budget or a money "
+                     "amount. Rewrite it with ZERO pricing talk — no price, no "
+                     "cost figure, no currency. A colleague handles commercials "
+                     "separately.")
+        try:
+            text2 = _call_llm(system, retry_ctx, max_tokens=max_tok,
+                              db=db, agent_id=agent.id)
+            s2, b2 = "Quick note", text2
+            if text2.lower().startswith("subject:"):
+                first, _, rest = text2.partition("\n")
+                s2 = first.split(":", 1)[1].strip()[:200]
+                b2 = rest.strip()
+            s2, b2 = _humanize(s2), _humanize(b2)
+            s2, b2 = playbook.scrub(s2, agent), playbook.scrub(b2, agent)
+            if not has_pricing_talk(s2) and not has_pricing_talk(b2):
+                subject, body = s2, b2
+        except Exception:
+            pass
+        if has_pricing_talk(subject):
+            subject = strip_pricing_talk(subject) or "Quick note"
+        if has_pricing_talk(body):
+            body = strip_pricing_talk(body)
+
+    # CTA: the booking link is inserted by code, after every scrub, so it is
+    # the one URL that is allowed to reach the reader.
+    body = apply_cta(body, campaign, agent)
 
     tpl_id = 0
     if template and record_template_use:

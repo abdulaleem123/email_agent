@@ -26,7 +26,9 @@ export default function Dashboard() {
 
   const loadAll = () => {
     setLoading(true)
-    Promise.all([api.stats(win), api.timeseries(15)])
+    // The chart follows the same window as the stat cards (Overall = 90d cap).
+    const days = win === 'all' ? 90 : Math.max(1, parseInt(win, 10) || 15)
+    Promise.all([api.stats(win), api.timeseries(days)])
       .then(([s, se]) => { setStats(s); setSeries(se) })
       .catch(() => {})
       .finally(() => setLoading(false))

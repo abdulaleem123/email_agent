@@ -9,7 +9,7 @@ export default function Garbage() {
   const [toast, show] = useToast()
   const PER = 25
 
-  const load = () => api.garbage(page, PER).then(d => { setData(d); setSel(new Set()) }).catch(e => show(e.message, true))
+  const load = () => api.garbage({ page, per_page: PER }).then(d => { setData(d); setSel(new Set()) }).catch(e => show(e.message, true))
   useEffect(() => { load() }, [page])
 
   const toggleAll = () => setSel(s => s.size === data.items.length ? new Set() : new Set(data.items.map(m => m.id)))
@@ -29,7 +29,7 @@ export default function Garbage() {
     } catch (e) { show(e.message, true) }
   }
   const clearAll = async () => {
-    if (!confirm(`Permanently delete all ${data.total} garbage items?`)) return
+    if (!confirm(`Permanently delete all ${data.total} trash items?`)) return
     try {
       const r = await api.clearGarbage()
       show(`Cleared ${r.deleted} items`); setPage(1); load()
@@ -67,7 +67,7 @@ export default function Garbage() {
                 <td><button className="btn danger small" onClick={() => deleteOne(m.id)}>✕</button></td>
               </tr>
             ))}
-            {data.items.length === 0 && <tr><td colSpan={6}><div className="empty">Garbage is empty — spam and unverified emails land here</div></td></tr>}
+            {data.items.length === 0 && <tr><td colSpan={6}><div className="empty">Trash is empty — spam, unverified emails and declined leads land here</div></td></tr>}
           </tbody>
         </table>
       </div>

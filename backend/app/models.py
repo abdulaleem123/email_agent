@@ -40,6 +40,7 @@ class BatchStatus(str, enum.Enum):
     running = "running"
     completed = "completed"     # shows green in UI
     paused = "paused"
+    cancelled = "cancelled"     # operator cancelled mid-run (dispatch_batch skips it)
 
 
 # ---------------------------------------------------------------- auth
@@ -80,7 +81,28 @@ class Agent(Base):
     avatar_url = Column(String(500), default="")
     description = Column(Text, default="")
     persona_prompt = Column(Text, default="")            # how THIS agent writes & pitches
+    sentiment_prompt = Column(Text, default="")          # sentiment-aware matching layer
+    country_prompt = Column(Text, default="")            # country/region communication layer
+    judgment_prompt = Column(Text, default="")           # professional judgment layer
     pitch_style = Column(Text, default="")               # extra sales-psychology notes
+    # ── WHO / WHAT / HOW, read by BOTH the prompt and the send gates ────────
+    # Which of the four built-in voices this agent writes as ("" = by name).
+    persona = Column(String(30), default="")
+    # "Why you?" — value, proof and business outcomes. Facts, never a pitch.
+    why_you = Column(Text, default="")
+    # Who to write to: decision-maker roles + the market to write for.
+    target_titles = Column(Text, default="")
+    target_location = Column(String(200), default="")
+    # Hard exclusions — never targeted, enforced in code before any send.
+    excluded_titles = Column(Text, default="")
+    excluded_companies = Column(Text, default="")
+    # The Chatversio AI solutions this agent may present ("" = all of them).
+    # The agent still picks ONE per company, from its research.
+    solutions = Column(Text, default="")
+    # Words/phrases banned from subject AND body (enforced after generation).
+    avoid_phrases = Column(Text, default="")
+    # Free-text rules stacked on top of the default prompt.
+    extra_instructions = Column(Text, default="")
     tone = Column(Enum(Tone), default=Tone.professional)
     message_length = Column(Enum(MsgLength), default=MsgLength.medium)
     project_url = Column(String(500), default="")
@@ -115,9 +137,37 @@ class Campaign(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(200), nullable=False)
     goal = Column(Text, default="")
-    strategy = Column(String(20), default="B2B")         # B2B | B2C | ABM | custom
+    strategy = Column(String(20), default="B2B")         # B2B | B2C | C2C | C2B | B2G | B2B2C | D2C | SMB | Enterprise | ABM | custom, ...
+    strategy_notes = Column(Text, default="")            # optional info note about the strategy/tone
     template_mode = Column(String(20), default="template")  # template | plain
-    batch_size = Column(Integer, default=20)             # 20–50
+    # DEPRECATED / UNUSED. Batch size is a Settings-page value now
+    # (SettingKV "email_batch_size"), not a per-campaign one. The column stays
+    # so old rows keep working; nothing reads it.
+    batch_size = Column(Integer, default=50)
+    followup_1_hours = Column(Integer, default=24)       # first follow-up after N hours (stage 1)
+    followup_2_hours = Column(Integer, default=48)       # second follow-up after N hours (stage 2)
+    followup_3_hours = Column(Integer, default=72)       # third follow-up after N hours (stage 3)
+    followup_max_days = Column(Integer, default=30)      # no reply for N days -> Garbage
+    # FOLLOW-UP STRATEGY (days-wise + count-wise). followup_plan is a comma list
+    # of day offsets from the last outbound, e.g. "3,7,14" = follow-up 1 on day
+    # 3, follow-up 2 on day 7, follow-up 3 on day 14. followup_count caps how
+    # many actually go out, so a 5-day plan with count 3 stops at 3. When the
+    # plan is empty the legacy followup_N_hours stage timing is used instead, so
+    # campaigns created before this still behave exactly as they did.
+    followup_plan = Column(String(200), default="")       # e.g. "3,7,14"
+    followup_count = Column(Integer, default=3)           # max follow-ups
+    followup_memory = Column(Boolean, default=True)       # follow-ups reference the real thread
+    # WHAT HAPPENS WHEN THEY SAY "not interested" / "we don't want to work"
+    not_interested_action = Column(String(20), default="garbage")  # garbage | close
+    not_interested_retention_days = Column(Integer, default=30)   # then purged for good
+    # Never let the AI answer these on its own — auto-pause + escalate instead.
+    pricing_policy = Column(String(20), default="escalate")       # escalate | reply
+    # First-email length: short | medium | long (overrides the agent default).
+    first_email_length = Column(String(20), default="")
+    # Offer a live realtime demo in the first email instead of a brochure.
+    demo_offer = Column(Boolean, default=True)
+    # Subject-line rules: short, specific, never ad-like.
+    subject_max_words = Column(Integer, default=3)
     industry = Column(String(120), default="")           # target industry
     email_length = Column(String(20), default="concise") # short|concise|long|professional
     what_to_sell = Column(Text, default="")              # products/services to pitch
@@ -127,6 +177,29 @@ class Campaign(Base):
     pain_focus = Column(Text, default="")                # which pains to target (country/target wise)
     sell_points = Column(Text, default="")               # WHAT to sell / emphasise
     avoid_points = Column(Text, default="")              # what NOT to mention
+    # ── WHAT ARE YOU OFFERING? ───────────────────────────────────────────────
+    # Reality-based description of the service — how it actually is, never a
+    # pitch — plus the delivery model in plain text (what the client gets, how
+    # it is delivered, what the engagement looks like).
+    offering = Column(Text, default="")
+    delivery_model = Column(Text, default="")
+    # IDEAL CUSTOMER + the platform rules this campaign runs under.
+    ideal_customer = Column(Text, default="")
+    platform_rules = Column(Text, default="")            # "" = built-in defaults
+    # NO PRICING TALK: never mention pricing in subject or body.
+    no_pricing = Column(Boolean, default=True)
+    # CTA: end on the booking link. booking_link overrides the agent's own
+    # Calendly/meeting URL for this campaign ("" = use the agent's).
+    cta_enabled = Column(Boolean, default=True)
+    booking_link = Column(String(500), default="")
+    # FOLLOW-UP SCHEDULE. Days = which weekday a follow-up may go out
+    # ("mon,tue,...", "" = any day), time = time of day in UTC ("" = any time).
+    followup_days = Column(String(60), default="")       # "" = Mon..Sun
+    followup_time = Column(String(5), default="")        # "" = any time
+    # SELECTION BOX — which parts of the AGENT this campaign's information is
+    # allowed to drive. Comma list of agent_settings.PART_KEYS; "" = every part,
+    # which is the default, so untouched campaigns use the whole agent.
+    agent_parts = Column(String(500), default="")
     status = Column(String(20), default="active")        # active | paused
     agent_id = Column(Integer, ForeignKey("agents.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -138,7 +211,7 @@ class Campaign(Base):
 
 
 class Batch(Base):
-    """Campaign leads are sent in batches of 20–50; completed shows green."""
+    """Campaign leads are sent in batches of 20-50; completed shows green."""
     __tablename__ = "batches"
     id = Column(Integer, primary_key=True)
     campaign_id = Column(Integer, ForeignKey("campaigns.id"), index=True)
@@ -147,6 +220,7 @@ class Batch(Base):
     sent = Column(Integer, default=0)
     failed = Column(Integer, default=0)
     status = Column(Enum(BatchStatus), default=BatchStatus.pending)
+    source_filename = Column(String(300), default="", index=True)  # excel it came from
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
 
@@ -177,6 +251,22 @@ class Lead(Base):
     unsub_token = Column(String(64), default="", unique=False)  # public no-auth unsub link token
     ai_paused = Column(Boolean, default=False)           # human takeover on this thread
     pitch_done = Column(Boolean, default=False, index=True)  # marked done in Pitch Decker
+    escalated = Column(Boolean, default=False, index=True)   # needs a human - agent auto-paused
+    escalation_reason = Column(String(300), default="")
+    # A HUMAN HAS TO ANSWER THIS (pricing, contract, legal, security, "who are
+    # you"). Deliberately NOT the same as `escalated`: the thread stays visible
+    # in Messages so the human can see the conversation and reply, it just stops
+    # the agent from answering on its own. `escalated` still means "hidden from
+    # Messages, parked for a human to resume".
+    needs_human = Column(Boolean, default=False, index=True)
+    needs_human_reason = Column(String(300), default="")
+    # "Not interested" / "we don't want to work" -> agent goes silent, lead goes
+    # to the Garbage inbox, purged after the campaign's retention (default 30d).
+    not_interested = Column(Boolean, default=False, index=True)
+    not_interested_at = Column(DateTime, nullable=True)
+    not_interested_note = Column(String(300), default="")
+    garbage_at = Column(DateTime, nullable=True)         # drives the 30-day purge
+    last_outbound_subject = Column(String(300), default="")  # never repeat this
     upload_tag = Column(String(200), default="", index=True)  # which excel sheet it came from
     followups_sent = Column(Integer, default=0)
     last_outbound_at = Column(DateTime, nullable=True)
@@ -192,7 +282,7 @@ class Lead(Base):
     messages = relationship("EmailMessage", back_populates="lead",
                             order_by="EmailMessage.created_at",
                             cascade="all, delete-orphan")
-    __table_args__ = (UniqueConstraint("email", name="uq_lead_email"),)
+    __table_args__ = (UniqueConstraint("email", "source", name="uq_lead_email_source"),)
 
 
 class EmailMessage(Base):
@@ -208,6 +298,12 @@ class EmailMessage(Base):
     html_used = Column(Boolean, default=False)           # template (HTML+logo) vs plain
     is_spam = Column(Boolean, default=False)
     spam_reason = Column(String(300), default="")
+    # ESCALATION: a human has to look at this one (meeting link, promotion,
+    # role-account reply, delivery failure, blocked outbound). Kept OUT of the
+    # spam/garbage pool on purpose — the Escalation page owns it, it is never
+    # auto-replied to, and it is purged on its own 30-day clock.
+    is_escalation = Column(Boolean, default=False, index=True)
+    escalation_reason = Column(String(300), default="")
     message_id = Column(String(500), default="")
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
@@ -319,6 +415,49 @@ class AuditLog(Base):
     detail = Column(Text, default="")
     ip_address = Column(String(64), default="")
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ImportJob(Base):
+    """A long-running IMPORT (Excel/CSV upload, or a bulk mailbox verify).
+
+    Uploading 80k rows cannot happen inside one HTTP request: it needs minutes
+    of parsing, de-duplication, MX checks and inserts, and a request that runs
+    that long just times out (or dies with a 500) while the browser waits.
+
+    So the POST hands the file to this table and returns immediately with a job
+    id; the work runs in the background and every phase/counter is written back
+    here, which is exactly what the progress bar polls. Being a table (not
+    memory) means a page refresh, a new tab, or another API worker all see the
+    same live progress, and a finished import keeps its result for the receipt.
+
+    status: queued -> running -> done | error | cancelled
+    phase:  human-readable 'Importing rows 12 000 / 80 000…'
+    """
+    __tablename__ = "import_jobs"
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(40), default="upload")            # upload | verify
+    filename = Column(String(300), default="")
+    source = Column(String(40), default="excel")           # excel | pitch
+    status = Column(String(20), default="queued", index=True)
+    phase = Column(String(300), default="Queued")
+    pct = Column(Integer, default=0)                        # 0-100, for the bar
+    total = Column(Integer, default=0)                     # rows in the file
+    processed = Column(Integer, default=0)
+    created_count = Column(Integer, default=0)
+    skipped_count = Column(Integer, default=0)
+    cross_dup_count = Column(Integer, default=0)
+    blocked_count = Column(Integer, default=0)
+    unverified_count = Column(Integer, default=0)
+    batch_size = Column(Integer, default=50)
+    campaign_id = Column(Integer, nullable=True)
+    agent_id = Column(Integer, nullable=True)
+    auto_enroll = Column(Boolean, default=False)
+    upload_tag = Column(String(200), default="")
+    error = Column(Text, default="")
+    payload = Column(Text, default="")                     # uploaded bytes, hex
+    result_json = Column(Text, default="")                 # receipt, filled on done
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class PitchRecord(Base):

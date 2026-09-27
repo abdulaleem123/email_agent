@@ -21,6 +21,43 @@ def list_agents(db: Session = Depends(get_db)):
     return [_out(a) for a in db.query(models.Agent).order_by(models.Agent.id).all()]
 
 
+@router.get("/playbook")
+def playbook_reference():
+    """Everything the Agent UI needs to show what this system can present and
+    what it is never allowed to say.
+
+    Served from the same constants the prompt builder and the send gates read,
+    so the UI can never drift away from what the agent actually does. The
+    public website is the source of the services below, but its address is
+    deliberately absent from this payload and from every email."""
+    from ..services import playbook
+    return {
+        "solutions": playbook.SOLUTIONS,
+        "personas": playbook.PERSONAS,
+        "avoid_phrases": playbook.DEFAULT_AVOID_PHRASES,
+        "no_website_rule": playbook.no_website_rule(),
+    }
+
+
+@router.get("/default-prompt")
+def default_agent_prompt():
+    """THE DEFAULT AGENT PROMPT — every setting the agent runs by, stated out
+    loud: what you sell, ideal customer, avoid phrases, platform rules, extra
+    instructions, no pricing talk, CTA, excluded/target titles, unsubscribe,
+    subject, body, follow-ups, not-interested and interested handling.
+
+    Same source the prompt builder reads, so the UI can never drift from what
+    the agent actually does. A campaign narrows this down to the parts its
+    selection box switched on."""
+    from ..services import agent_settings
+    return {
+        "prompt": agent_settings.default_prompt(),
+        "parts": [{"key": p["key"], "label": p["label"], "desc": p["desc"]}
+                  for p in agent_settings.PARTS],
+        "weekdays": agent_settings.WEEKDAYS,
+    }
+
+
 @router.post("", response_model=schemas.AgentOut)
 def create_agent(data: schemas.AgentCreate, db: Session = Depends(get_db)):
     if db.query(models.Agent).count() >= settings.MAX_AGENTS:

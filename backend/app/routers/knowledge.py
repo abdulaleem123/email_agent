@@ -38,10 +38,9 @@ def list_docs(agent_id: int | None = Query(default=None),
               db: Session = Depends(get_db)):
     q = db.query(models.KnowledgeDoc)
     if agent_id is not None:
-        q = q.filter((models.KnowledgeDoc.agent_id == agent_id) |
-                     (models.KnowledgeDoc.agent_id.is_(None)))
-    return q.order_by(models.KnowledgeDoc.agent_id.nullsfirst(),
-                      models.KnowledgeDoc.created_at.desc()).all()
+        # show ONLY this agent's exact KB — no shared/legacy docs mixed in
+        q = q.filter(models.KnowledgeDoc.agent_id == agent_id)
+    return q.order_by(models.KnowledgeDoc.created_at.desc()).all()
 
 
 @router.post("/knowledge", response_model=schemas.KnowledgeOut)
@@ -98,8 +97,8 @@ def list_templates(agent_id: int | None = Query(default=None),
                    db: Session = Depends(get_db)):
     q = db.query(models.Template)
     if agent_id is not None:
-        q = q.filter((models.Template.agent_id == agent_id) |
-                     (models.Template.agent_id.is_(None)))
+        # show ONLY this agent's exact templates — no shared/legacy mixed in
+        q = q.filter(models.Template.agent_id == agent_id)
     return q.order_by(models.Template.created_at.desc()).all()
 
 

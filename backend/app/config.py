@@ -72,9 +72,27 @@ class Settings(BaseSettings):
     FOLLOWUP_AFTER_HOURS: int = 24
     MAX_FOLLOWUPS: int = 3
     MAX_AGENTS: int = 10
+
+    # ── Outbound volume, all set from the Settings page (not per campaign) ──
+    # Hard ceiling per agent per day. 0 = no global cap, fall back to the
+    # agent's own daily_send_limit. The effective limit is always the SMALLER
+    # of the two, so a global cap can only ever tighten sending, never loosen
+    # what the operator set on the agent.
+    DAILY_SEND_LIMIT: int = 150
+    # How many leads go into one Batch. 20 / 30 / 40 / 50 are the sensible
+    # choices; anything between BATCH_SIZE_MIN and BATCH_SIZE_MAX is allowed.
+    EMAIL_BATCH_SIZE: int = 50
     BATCH_SIZE_MIN: int = 20
     BATCH_SIZE_MAX: int = 50
+    # How many inbound messages one poll reads before it stops for this cycle.
+    # Keeps a big backlog from being pulled in one enormous IMAP session.
+    EMAIL_POLL_SIZE: int = 100
+
     GARBAGE_RETENTION_DAYS: int = 30           # auto-purge old garbage
+    ESCALATION_RETENTION_DAYS: int = 30        # escalations self-purge (own page, own clock)
+    STALE_LEAD_DAYS: int = 30                  # a lead with no activity for N days -> Garbage
+    NOT_INTERESTED_RETENTION_DAYS: int = 30    # "not interested" -> Garbage, then deleted
+    FOLLOWUP_MAX_DAYS: int = 30                # no reply for N days -> sequence closes
     MX_VERIFY_BEFORE_SEND: bool = True         # unverified domain -> garbage
     SMTP_VERIFY_MAILBOX: bool = True           # SMTP RCPT probe (mailbox exists?)
 

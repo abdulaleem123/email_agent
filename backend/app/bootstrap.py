@@ -28,6 +28,59 @@ AGENTS = [
          signature="Dawood\nFrontend & Full-Stack Developer"),
 ]
 
+# ── defaults for the targeting / offering / language fields ─────────────────
+# Seeded on every agent so the layers are live from the first boot, then left
+# alone — the backfill only ever fills a field that is still empty.
+#
+# WHY YOU is deliberately NOT a pitch: value, proof and outcomes stated as
+# things already observed. No offer, no benefit list, no call to action.
+DEFAULT_WHY_YOU = {
+    "Osaja": "Works with owners who are losing time to repetitive customer "
+             "handling and enquiries that go unanswered. Starts from what is "
+             "actually slowing the operation down, never from a product. "
+             "Observed outcomes: replies in seconds instead of hours, fewer "
+             "dropped enquiries, and no extra headcount to carry the load.",
+    "Saif": "Founder writing to founder, so the point is made in a line or two. "
+            "One focus: the people who already reached out should not be the "
+            "ones left waiting. Observed outcomes: an answer the moment someone "
+            "writes, the right questions asked before anyone's time is spent, "
+            "and a person brought in only when it matters.",
+    "Aleem": "A technical peer who has built systems like these in production "
+             "and says plainly what will and will not work. Observed outcomes: "
+             "the repetitive part of an operational area (support triage, "
+             "internal knowledge, data handoffs) stops consuming a team's day, "
+             "and a useful first slice shows up before any larger commitment.",
+    "Dawood": "Works alone and looks at the actual site or product before "
+              "saying anything, then names one specific thing that could work "
+              "better. Observed outcomes: a clear scope, one person accountable "
+              "end to end, and something working in days rather than a quarter.",
+}
+
+# Who this system writes to by default: the people who own the problem.
+# Blank titles are never filtered, so a sheet without a title column still
+# enrolls. Clear the field to allow every role.
+DEFAULT_TARGET_TITLES = (
+    "founder, co-founder, owner, managing director, chief, ceo, coo, cto, "
+    "cio, cmo, cro, president, vice president, vp, head, director, manager, "
+    "lead, principal, partner"
+)
+
+# Persona = which of the four voices writes as. Falls back to the name.
+def _persona_key(name: str) -> str:
+    n = (name or "").strip().lower()
+    return n if n in {"osaja", "saif", "aleem", "dawood"} else ""
+
+
+AGENT_DEFAULT_FIELDS = {
+    "target_titles": DEFAULT_TARGET_TITLES,
+    "target_location": "",           # adapts to the lead's own country unless set
+    "excluded_titles": "",           # e.g. recruiter, intern, student
+    "excluded_companies": "",        # e.g. named accounts, competitors, "agency"
+    "solutions": "",                 # empty = the whole catalogue is available
+    "avoid_phrases": "",             # empty = built-in defaults still apply
+    "extra_instructions": "",
+}
+
 # (agent_name or None=shared, title, content)
 DOCS = [
     (None, "Chatversio AI — what we sell",
@@ -119,9 +172,35 @@ def bootstrap():
             return
         if db.query(models.Agent).count() == 0:
             for spec in AGENTS:
-                db.add(models.Agent(**spec))
+                full = dict(AGENT_DEFAULT_FIELDS)
+                full.update(spec)
+                full["persona"] = _persona_key(spec["name"])
+                full["why_you"] = DEFAULT_WHY_YOU.get(spec["name"], "")
+                db.add(models.Agent(**full))
             db.commit()
         agents = {a.name: a.id for a in db.query(models.Agent).all()}
+
+        # ONE-TIME backfill for an install that already had agents before these
+        # fields existed: fill whatever is still empty, then never touch them
+        # again (a marker key), so anything the operator later clears stays
+        # cleared instead of being re-seeded on the next boot.
+        if not db.get(models.SettingKV, "agent_targeting_defaults_v1"):
+            for a in db.query(models.Agent).all():
+                changed = False
+                if not (a.persona or "").strip():
+                    a.persona = _persona_key(a.name)
+                    changed = True
+                if not (a.why_you or "").strip():
+                    a.why_you = DEFAULT_WHY_YOU.get(a.name, "")
+                    changed = True
+                if not (a.target_titles or "").strip():
+                    a.target_titles = DEFAULT_TARGET_TITLES
+                    changed = True
+                if changed:
+                    db.commit()
+            db.add(models.SettingKV(key="agent_targeting_defaults_v1",
+                                    value="1"))
+            db.commit()
         if db.query(models.KnowledgeDoc).count() == 0:
             for agent_name, title, content in DOCS:
                 db.add(models.KnowledgeDoc(

@@ -8,7 +8,9 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://api:8000',
+        // local dev -> http://localhost:8000 ; docker-compose sets
+        // VITE_API_PROXY=http://api:8000 (compose service name)
+        target: process.env.VITE_API_PROXY || 'http://localhost:8000',
         changeOrigin: true,
       }
     }

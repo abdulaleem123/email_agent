@@ -5,15 +5,20 @@ import { Toast, useToast, useOpenAIKey } from '../App.jsx'
 import { IconSend, IconPause, IconRefresh, IconMail } from '../Icons.jsx'
 
 /**
- * Messages — all conversations across all agent inboxes.
- * Paginated threads, realtime polling, distinct bubbles for prospect/AI/you,
- * per-agent play/pause with immediate effect.
+ * Messages — HOT leads only by default.
+ *
+ * "Hot" = the lead actually replied (or is mid-conversation) and something
+ * landed recently, so it's still worth a human's time. Cold/stale threads and
+ * anything 30+ days quiet are swept into Garbage by the daily beat and are not
+ * listed here. Turn on "Show all threads" to see the full history including
+ * stale ones.
  */
 export default function Inbox() {
   const { openaiReady } = useOpenAIKey()
   const aiDisabled = openaiReady === false
   const [agents, setAgents] = useState([])
   const [agentId, setAgentId] = useState(0)
+  const [allThreads, setAllThreads] = useState(false)
   const [convos, setConvos] = useState([])
   const [convoPage, setConvoPage] = useState(1)
   const [convoTotal, setConvoTotal] = useState(0)
@@ -26,6 +31,7 @@ export default function Inbox() {
   const [body, setBody] = useState('')
   const [sending, setSending] = useState(false)
   const [live, setLive] = useState(true)
+  const [needsHumanCount, setNeedsHumanCount] = useState(0)
   const lastSeenId = useRef(0)
   const [toast, show] = useToast()
 
@@ -34,6 +40,7 @@ export default function Inbox() {
   const loadConvos = useCallback(() => {
     const params = new URLSearchParams({ page: convoPage, per_page: 20 })
     if (agentId) params.set('agent_id', agentId)
+    if (allThreads) params.set('all_threads', 'true')
     if (convoQ.trim()) params.set('q', convoQ.trim())
     api.inboxPaged(params.toString())
       .then(r => {
@@ -41,9 +48,10 @@ export default function Inbox() {
         setConvos(d.items || [])
         setConvoTotal(d.total || 0)
         setConvoPages(d.pages || 1)
+        setNeedsHumanCount(d.needs_human || 0)
       })
       .catch(() => setConvos([]))
-  }, [agentId, convoPage, convoQ])
+  }, [agentId, convoPage, convoQ, allThreads])
 
   useEffect(() => { loadConvos() }, [loadConvos])
 
@@ -118,6 +126,23 @@ export default function Inbox() {
       : 'AI resumed for this conversation')
   }
 
+  const resolveHuman = async (resume) => {
+    if (!open) return
+    try {
+      const r = await api.resolveNeedsHuman(open.lead_id, { resume })
+      setThread(t => ({
+        ...t,
+        lead: { ...t.lead, needs_human: false, needs_human_reason: '', ai_paused: r.ai_paused },
+      }))
+      setConvos(list => list.map(c => c.lead_id === open.lead_id
+        ? { ...c, needs_human: false, needs_human_reason: '', ai_paused: r.ai_paused } : c))
+      setNeedsHumanCount(n => Math.max(0, n - 1))
+      show(resume
+        ? 'Handed back to the agent — it can reply on this thread again'
+        : 'Closed. The agent will not write on this thread again')
+    } catch (e) { show(e.message, true) }
+  }
+
   const current = agents.find(a => a.id === agentId)
   const totalPages = thread ? Math.max(1, thread.pages || 1) : 1
 
@@ -126,12 +151,14 @@ export default function Inbox() {
       <div className="messages-intro card mb">
         <MiniOrb size={52} color="#0054FC" accent="#00BAFF" />
         <div style={{ flex: 1 }}>
-          <b>Every conversation, every direction, in one place</b>
+          <b>Hot leads — the conversations that still need you</b>
           <p className="sm mut mt">
             <b>AI Live</b> means the agent is active and will auto-reply to inbound emails (after the
             configured inbound delay) and send scheduled outbound emails. Pausing stops <em>both</em> inbound
             auto-replies and outbound sends for that agent. Inbound/outbound timing is set on the
             Settings page in real-time — no restart needed. You can also pause AI per-conversation below.
+            {' '}Meeting links, promotions, role accounts and delivery failures are <b>not</b> here — they sit in{' '}
+            <b>Escalation</b> until a human decides.
           </p>
         </div>
         <button className={`icon-btn ${live ? 'on' : ''}`} onClick={() => setLive(l => !l)}
@@ -170,11 +197,29 @@ export default function Inbox() {
         <input style={{ flex: 1, padding: '8px 12px', borderRadius: 8, border: '1px solid var(--line)', fontSize: 13 }}
                placeholder="Search conversations…" value={convoQ}
                onChange={e => { setConvoQ(e.target.value); setConvoPage(1) }} />
-        <span className="sm mut">{convoTotal} total</span>
+        <div className="seg">
+          <button className={!allThreads ? 'on' : ''} onClick={() => { setAllThreads(false); setConvoPage(1) }}
+                  title="Only hot leads with a live conversation in the last 30 days">
+            Hot leads
+          </button>
+          <button className={allThreads ? 'on' : ''} onClick={() => { setAllThreads(true); setConvoPage(1) }}
+                  title="Every thread, including cold and stale ones">
+            Show all threads
+          </button>
+        </div>
+        <span className="sm mut">
+          {convoTotal} {allThreads ? 'total' : 'hot'}
+        </span>
       </div>
 
       <div className="card" style={{ padding: 0 }}>
-        {(!Array.isArray(convos) || convos.length === 0) && <div className="empty">No conversations yet.</div>}
+        {(!Array.isArray(convos) || convos.length === 0) && (
+          <div className="empty">
+            {allThreads
+              ? 'No conversations yet.'
+              : 'No hot leads right now — only leads with a live conversation show here. Use "Show all threads" for full history, and check the Escalation page for mail a human must handle.'}
+          </div>
+        )}
         {(Array.isArray(convos) ? convos : []).map(c => (
           <div key={c.lead_id} className={`convo ${open?.lead_id === c.lead_id ? 'on' : ''}`}>
             <div className="avatar-fallback" onClick={() => openConvo(c)} style={{ cursor: 'pointer' }}>{(c.name || c.email || '?')[0].toUpperCase()}</div>
@@ -185,7 +230,19 @@ export default function Inbox() {
               </div>
               <div className="sm mut ellipsis">
                 {c.company}
-                {c.ai_paused && <span className="pill" style={{ background: '#fee2e2', color: '#b91c1c', marginLeft: 6 }}>AI paused</span>}
+                {c.needs_human && (
+                  <span className="pill" style={{ background: '#fef3c7', color: '#b45309', marginLeft: 6 }}
+                        title={c.needs_human_reason || 'The agent paused: a human has to answer this'}>
+                    Human needed
+                  </span>
+                )}
+                {c.not_interested && (
+                  <span className="pill" style={{ background: '#e5e7eb', color: '#4b5563', marginLeft: 6 }}
+                        title={c.not_interested_note || 'They said not interested — the agent is silent'}>
+                    Not interested
+                  </span>
+                )}
+                {c.ai_paused && !c.needs_human && <span className="pill" style={{ background: '#fee2e2', color: '#b91c1c', marginLeft: 6 }}>AI paused</span>}
               </div>
               <div className="snip ellipsis">
                 {c.last_direction === 'in' ? '↩ ' : '→ '}
@@ -229,6 +286,22 @@ export default function Inbox() {
               <div className="err mb sm">
                 You've taken over this conversation — the agent won't auto-reply or send follow-ups
                 to {open.name || open.email} until you resume it.
+              </div>
+            )}
+            {thread.lead?.needs_human && (
+              <div className="warn mb sm">
+                <b>Answer this one yourself.</b> {open.name || open.email} asked something the agent
+                is not allowed to answer{thread.lead?.needs_human_reason
+                  ? ` (${String(thread.lead.needs_human_reason).replace(/^needs-human:/, '')})` : ''}.
+                The agent has gone quiet on this thread and it is also flagged on the Escalation page.
+                <div className="row" style={{ gap: 8, marginTop: 8 }}>
+                  <button className="btn small" onClick={() => resolveHuman(true)}>
+                    I handled it — let the agent reply again
+                  </button>
+                  <button className="btn ghost small" onClick={() => resolveHuman(false)}>
+                    Done — keep the agent off this thread
+                  </button>
+                </div>
               </div>
             )}
 

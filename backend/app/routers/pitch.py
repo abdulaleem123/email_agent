@@ -12,6 +12,36 @@ from ..services import pitch as pitch_service
 
 router = APIRouter(prefix="/api/pitch", tags=["pitch"])
 
+CHUNK = 2000          # ids per statement (Postgres bind-parameter limit)
+
+
+def _sales_agent_or_400(db: Session, agent_id: int | None) -> models.Agent:
+    """Resolve the pitch agent and fail with a READABLE 400 instead of letting
+    a missing agent become a generic 500 on the button."""
+    agent = db.get(models.Agent, agent_id) if agent_id else _default_sales_agent(db)
+    if not agent:
+        raise HTTPException(400, "No agent available — create one in Agents first")
+    return agent
+
+
+def _require_llm_key(db: Session) -> None:
+    from ..services import keys as keysvc
+    if settings.LLM_PROVIDER.lower() == "openai" and not keysvc.openai_key(db):
+        raise HTTPException(400, "No OpenAI key set — add it in Super Admin → API Keys")
+
+
+def _llm_call(fn, *args, **kwargs):
+    """Wrap the research/LLM call. These are third-party network calls: an
+    upstream timeout or rate-limit used to surface as an opaque 500 with a
+    stack trace, so the team thought the button was broken. Now it is a 502
+    that says what actually failed."""
+    try:
+        return fn(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Pitch generation failed: {e}")
+
 
 def _default_sales_agent(db: Session) -> models.Agent | None:
     a = db.query(models.Agent).filter(models.Agent.name.ilike("osaja")).first()
@@ -56,14 +86,22 @@ class BulkPitchIds(BaseModel):
 def bulk_delete_pitches(data: BulkPitchIds, db: Session = Depends(get_db)):
     if not data.ids:
         raise HTTPException(400, "No pitches selected")
-    n = (db.query(models.PitchRecord)
-         .filter(models.PitchRecord.id.in_(data.ids))
-         .delete(synchronize_session=False))
+    # Chunked: a "select all" across thousands of records would exceed
+    # Postgres' bind-parameter limit in a single IN (...) and raise a 500.
+    ids = list(dict.fromkeys(data.ids))[:100000]
+    n = 0
+    for i in range(0, len(ids), 2000):
+        n += (db.query(models.PitchRecord)
+              .filter(models.PitchRecord.id.in_(ids[i:i + 2000]))
+              .delete(synchronize_session=False))
     db.commit()
     return {"deleted": n}
 
+
 @router.post("/delete-all")
 def delete_all_pitches(db: Session = Depends(get_db)):
+    """Wipe every transcript. Pitches are derived data (the lead, its research
+    and its mail history all stay), so this is safe and instant."""
     n = db.query(models.PitchRecord).delete(synchronize_session=False)
     db.commit()
     return {"deleted": n}
@@ -85,15 +123,10 @@ def generate(lead_id: int = Query(...), agent_id: int | None = Query(default=Non
     lead = db.get(models.Lead, lead_id)
     if not lead:
         raise HTTPException(404, "Lead not found")
-    agent = db.get(models.Agent, agent_id) if agent_id else _default_sales_agent(db)
-    if not agent:
-        raise HTTPException(400, "No agent available")
+    agent = _sales_agent_or_400(db, agent_id)
+    _require_llm_key(db)
 
-    from ..services import keys as keysvc
-    if settings.LLM_PROVIDER.lower() == "openai" and not keysvc.openai_key(db):
-        raise HTTPException(400, "No OpenAI key set — add it in Super Admin → API Keys")
-
-    summary, transcript = pitch_service.generate_pitch(db, lead, agent)
+    summary, transcript = _llm_call(pitch_service.generate_pitch, db, lead, agent)
     rec = models.PitchRecord(
         lead_id=lead.id, agent_id=agent.id, lead_name=lead.name,
         company=lead.company, phone=lead.phone, country=lead.country,
@@ -125,13 +158,10 @@ def generate_from_pickup(lead_id: int = Query(...), agent_id: int | None = Query
         raise HTTPException(404, "Lead not found")
     if not data.notes or not data.notes.strip():
         raise HTTPException(400, "Notes cannot be empty")
-    agent = db.get(models.Agent, agent_id) if agent_id else _default_sales_agent(db)
-    if not agent:
-        raise HTTPException(400, "No agent available")
-    from ..services import keys as keysvc
-    if settings.LLM_PROVIDER.lower() == "openai" and not keysvc.openai_key(db):
-        raise HTTPException(400, "No OpenAI key — add it in Super Admin → API Keys")
-    summary, transcript = pitch_service.generate_pickup_transcript(db, lead, agent, data.notes.strip())
+    agent = _sales_agent_or_400(db, agent_id)
+    _require_llm_key(db)
+    summary, transcript = _llm_call(
+        pitch_service.generate_pickup_transcript, db, lead, agent, data.notes.strip())
     rec = models.PitchRecord(
         lead_id=lead.id, agent_id=agent.id, lead_name=lead.name,
         company=lead.company, phone=lead.phone, country=lead.country,
@@ -150,18 +180,14 @@ def ask(lead_id: int = Query(...), agent_id: int | None = Query(default=None),
         raise HTTPException(404, "Lead not found")
     if not data.question or not data.question.strip():
         raise HTTPException(400, "Question cannot be empty")
-    agent = db.get(models.Agent, agent_id) if agent_id else _default_sales_agent(db)
-    if not agent:
-        raise HTTPException(400, "No agent available")
-
-    from ..services import keys as keysvc
-    if settings.LLM_PROVIDER.lower() == "openai" and not keysvc.openai_key(db):
-        raise HTTPException(400, "No OpenAI key set — add it in Super Admin → API Keys")
+    agent = _sales_agent_or_400(db, agent_id)
+    _require_llm_key(db)
 
     latest = (db.query(models.PitchRecord)
               .filter(models.PitchRecord.lead_id == lead.id)
               .order_by(models.PitchRecord.created_at.desc()).first())
-    answer = pitch_service.ask_about_lead(
+    answer = _llm_call(
+        pitch_service.ask_about_lead,
         db, lead, agent, data.question, latest.transcript if latest else "")
     return {"question": data.question, "answer": answer, "agent": agent.name}
 

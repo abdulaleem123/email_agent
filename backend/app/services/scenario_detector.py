@@ -39,7 +39,7 @@ SCENARIOS: dict[str, Scenario] = {
         code="not_interested",
         label="Not Interested",
         tone="respectful, brief, leave-door-open",
-        goal="Acknowledge gracefully. Don't push. Plant one curiosity seed. Offer to reconnect later.",
+        goal="Acknowledge gracefully, wish them well, leave the door open (say something like 'no problem at all — maybe we can work together in the future, have a great day, and if you ever need me, just reach out'). No follow-ups after this — only reply again if THEY write first.",
         kb_needed=False,
         offer_meeting=False,
     ),
@@ -276,8 +276,11 @@ def build_scenario_instruction(scenario: Scenario, agent_name: str, lead_name: s
     if scenario.code == "not_interested":
         lines += [
             "DO NOT re-pitch. DO NOT list features. One sentence acknowledging their choice.",
-            "Optional: one low-pressure sentence like 'Happy to reach out again if things change'.",
+            "Explicitly say something like: 'No problem at all — maybe we can work together ",
+            "in the future. Have a great day, and if you ever need me, just reach out.'",
             "Keep total reply under 4 sentences.",
+            "After this reply, do NOT follow up or push again. Only reply again if THEY ",
+            "write to you first — otherwise the conversation ends here.",
         ]
     elif scenario.code == "already_have":
         lines += [

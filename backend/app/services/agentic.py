@@ -14,7 +14,7 @@ from ..config import settings
 from .. import models
 from . import keys as keysvc, embeddings
 from .llm import (_persona_for, BASE_RULES, country_style, MEETING_DAYS_RULE,
-                  _thread_history)
+                  _thread_history, _thread_digest, settings_block)
 from .scenario_detector import detect_scenario, build_scenario_instruction
 
 
@@ -53,12 +53,15 @@ def _run_tool(db: Session, agent: models.Agent, name: str, args: dict) -> str:
 
 
 def generate_reply_agentic(db: Session, lead: models.Lead,
-                           agent: models.Agent) -> tuple[str, str]:
+                           agent: models.Agent,
+                           campaign: models.Campaign | None = None
+                           ) -> tuple[str, str]:
     """Returns (subject, body). Falls back to plain generator on error."""
     key = keysvc.openai_key(db)
     if settings.LLM_PROVIDER.lower() != "openai" or not key:
         from .llm import generate_email
-        s, b, _ = generate_email(db, lead, agent, purpose="reply", use_template=False)
+        s, b, _ = generate_email(db, lead, agent, purpose="reply",
+                                 use_template=False, campaign=campaign)
         return s, b
 
     from openai import OpenAI
@@ -94,10 +97,14 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
 
     system = (
         _persona_for(agent) + "\n\n" + BASE_RULES + "\n\n"
+        + settings_block(campaign) + "\n\n"
         "You are handling an INBOUND reply. Keep it SHORT or MEDIUM only. Human. Professional.\n"
         "Answer from knowledge base. Use scenario intelligence. No sales dump.\n"
-        "If not interested: respect it. We have no problem with that. We only solve real problems.\n"
-        "If they want to talk: say you will share a meeting link shortly. NEVER paste a URL.\n"
+        "If they want to talk: offer a LIVE REALTIME demo of the chat or voice agent — "
+        "the agent actually talking to a customer, in real time, on their own use case. "
+        "Not a brochure, not a deck. Say you will share a link to book it. NEVER paste a URL.\n"
+        "Call the product a CHAT AGENT or a VOICE AGENT. Never a chatbot, virtual "
+        "assistant, IVR, voice bot or AI rep.\n"
         "STRICT: no emojis, no hyphens as decoration, no bullet lists, no long essays.\n"
         f"Length target: {length}.\n\n"
         f"── SCENARIO INTELLIGENCE ──\n{scenario_block}\n\n"
@@ -110,7 +117,9 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
 
     convo = [
         {"role": "system", "content": system},
-        {"role": "user", "content": "THREAD SO FAR:\n" + (_thread_history(lead) or "(new)")},
+        {"role": "user", "content": (
+            "THREAD SO FAR:\n" + (_thread_history(lead) or "(new)")
+            + "\n\nWHERE THE THREAD STANDS:\n" + _thread_digest(lead))},
     ]
     tools = _tools(agent)
 
@@ -150,7 +159,8 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
 
     if not final_text:
         from .llm import generate_email
-        s, b, _ = generate_email(db, lead, agent, purpose="reply", use_template=False)
+        s, b, _ = generate_email(db, lead, agent, purpose="reply",
+                                 use_template=False, campaign=campaign)
         return s, b
 
     subject, body = "Re: your message", final_text
@@ -158,5 +168,18 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
         first, _, rest = final_text.partition("\n")
         subject = first.split(":", 1)[1].strip()[:200]
         body = rest.strip()
-    from .llm import _humanize
-    return _humanize(subject), _humanize(body)
+    from .llm import _humanize, strip_pricing_talk, has_pricing_talk, apply_cta
+    from . import playbook, agent_settings
+    # Same hard guarantees as outbound: no URLs / our address, no banned phrase.
+    subject = playbook.scrub(_humanize(subject), agent)
+    body = playbook.scrub(_humanize(body), agent)
+    # NO PRICING TALK — never answered, never written, campaign or not.
+    if (campaign is not None and agent_settings.is_on(campaign, "no_pricing")
+            and getattr(campaign, "no_pricing", True)):
+        if has_pricing_talk(subject):
+            subject = strip_pricing_talk(subject)
+        if has_pricing_talk(body):
+            body = strip_pricing_talk(body)
+    # CTA: the booking link is the one URL code is allowed to insert.
+    body = apply_cta(body, campaign, agent)
+    return subject, body

@@ -25,6 +25,17 @@ async function request(path, options = {}) {
   const res = await fetch(path, { ...options, headers })
 
   if (res.status === 401) {
+    // login / verify-otp legitimately return 401 for BAD CREDENTIALS —
+    // that is a sign-in error, not an expired session. Show the real
+    // server message instead of nuking the form with "Session expired".
+    const isAuthAttempt = path.startsWith('/api/auth/login') ||
+      path.startsWith('/api/auth/verify-otp')
+    if (isAuthAttempt) {
+      const body = await res.json().catch(() => null)
+      const detail = body?.detail
+      throw new Error(typeof detail === 'string' && detail
+        ? detail : 'Invalid email or password')
+    }
     logout()
     throw new Error('Session expired. Please sign in again.')
   }
@@ -52,8 +63,19 @@ async function request(path, options = {}) {
 }
 
 function qs(params) {
-  if (!params) return ''
-  if (typeof params === 'string') return params ? `?${params}` : ''
+  if (params == null || params === '') return ''
+  // Raw string: 'page=2&per_page=20' (also tolerates a leading '?').
+  if (typeof params === 'string') {
+    const s = params.replace(/^\?/, '')
+    return s ? `?${s}` : ''
+  }
+  // A bare number is a single value — never silently dropped.
+  if (typeof params === 'number') return `?${params}`
+  // URLSearchParams passed directly (Object.entries would see nothing).
+  if (params instanceof URLSearchParams) {
+    const s = params.toString()
+    return s ? `?${s}` : ''
+  }
   const s = new URLSearchParams()
   Object.entries(params).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '') s.append(k, v)
@@ -73,13 +95,16 @@ export const api = {
 
   // Dashboard
   stats: (window = '7d') => request(`/api/dashboard/stats${qs({ window })}`),
-  timeseries: (window = '7d') => request(`/api/dashboard/timeseries${qs({ window })}`),
+  timeseries: (days = 15) => request(`/api/dashboard/timeseries${qs({ days })}`),
   notifications: () => request('/api/dashboard/notifications'),
   markRead: () => request('/api/dashboard/notifications/read', { method: 'POST' }),
-  monitoring: () => request('/api/dashboard/monitoring'),
+  monitoring: (params) => request(`/api/dashboard/monitoring${qs(params)}`),
 
   // Agents
   agents: () => request('/api/agents'),
+  // Solutions catalogue, persona voices and the built-in Avoid Phrases list —
+  // served from the same constants the backend prompt + send gates use.
+  agentPlaybook: () => request('/api/agents/playbook'),
   saveAgent: (data, id) =>
     id
       ? request(`/api/agents/${id}`, { method: 'PUT', body: JSON.stringify(data) })
@@ -94,6 +119,13 @@ export const api = {
   campaignsPaged: (params) => request(`/api/campaigns/paged${qs(params)}`),
   createCampaign: (data) =>
     request('/api/campaigns', { method: 'POST', body: JSON.stringify(data) }),
+  updateCampaign: (id, data) =>
+    request(`/api/campaigns/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // The campaign-to-agent selection box: which parts of the agent this
+  // campaign's information is allowed to drive (all on by default).
+  campaignParts: () => request('/api/campaigns/parts'),
+  // The default Agent prompt, straight from the prompt builder.
+  defaultPrompt: () => request('/api/agents/default-prompt'),
   toggleCampaign: (id) => request(`/api/campaigns/${id}/toggle`, { method: 'POST' }),
   deleteCampaign: (id) => request(`/api/campaigns/${id}`, { method: 'DELETE' }),
   launch: (cid, leadIds) =>
@@ -108,14 +140,25 @@ export const api = {
   leads: (params) => request(`/api/leads${qs(params)}`),
   leadsPaged: (params) => request(`/api/leads/paged${qs(params)}`),
   leadsStats: () => request('/api/leads/stats'),
-  uploadLeads: (file, agentId, campaignId, source = 'excel') => {
+  // Upload is QUEUED: POST returns 202 + job_id immediately, then the page
+  // polls uploadJob(id) for the progress bar. Do not expect leads back here.
+  // batchSize is optional — omit it and the server uses the Settings-page
+  // "email batch size", which is the only place that decides it.
+  uploadLeads: (file, agentId, campaignId, source = 'excel', batchSize = null, autoEnroll = true) => {
     const fd = new FormData()
     fd.append('file', file)
     if (agentId) fd.append('agent_id', agentId)
     if (campaignId) fd.append('campaign_id', campaignId)
     const src = source === 'pitch' ? 'pitch' : 'excel'
-    return request(`/api/leads/upload?source=${src}`, { method: 'POST', body: fd })
+    return request(
+      `/api/leads/upload${qs({ source: src, batch_size: batchSize, auto_enroll: autoEnroll })}`,
+      { method: 'POST', body: fd })
   },
+  uploadJob: (id) => request(`/api/leads/upload/${id}`),
+  importJobs: (kind) => request(`/api/leads/jobs${qs({ kind })}`),
+  cancelImport: (id) => request(`/api/leads/upload/${id}/cancel`, { method: 'POST' }),
+  manualPitchLead: (data) =>
+    request('/api/leads/manual-pitch', { method: 'POST', body: JSON.stringify(data) }),
   enroll: (leadIds, campaignId, agentId) =>
     request('/api/leads/enroll', {
       method: 'POST',
@@ -126,6 +169,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ filter, campaign_id: campaignId, agent_id: agentId }),
     }),
+  // Enroll whole batches (20/30/40/50 groups) or every lead from one Excel.
+  enrollBatches: (batchIds, campaignId, agentId) =>
+    request('/api/leads/enroll', {
+      method: 'POST',
+      body: JSON.stringify({ batch_ids: batchIds, campaign_id: campaignId, agent_id: agentId }),
+    }),
+  enrollSourceFile: (sourceFile, campaignId, agentId) =>
+    request('/api/leads/enroll', {
+      method: 'POST',
+      body: JSON.stringify({ source_file: sourceFile, campaign_id: campaignId, agent_id: agentId }),
+    }),
   research: (leadId) => request(`/api/leads/${leadId}/research`, { method: 'POST' }),
   deleteLead: (id) => request(`/api/leads/${id}`, { method: 'DELETE' }),
   bulkDeleteLeads: (ids) =>
@@ -133,19 +187,29 @@ export const api = {
   bulkGarbageLeads: (ids) =>
     request('/api/leads/bulk-delete', { method: 'POST', body: JSON.stringify({ ids, to_garbage: true }) }),
   deleteAllLeads: () => request('/api/leads/all', { method: 'DELETE' }),
-  purgeCompletedLeads: () => request('/api/leads/purge-completed', { method: 'POST' }),
+  clearPitchQueue: () => request('/api/leads/pitch-queue', { method: 'DELETE' }),
+  purgeCompletedLeads: (days) =>
+    request(`/api/leads/purge-completed${qs({ days })}`, { method: 'POST' }),
   unverifiedToGarbage: () =>
     request('/api/leads/bulk-delete', { method: 'POST', body: JSON.stringify({ unverified: true, to_garbage: true }) }),
+  // Also a queued job now (MX lookups are DNS, they cannot run in a request).
   verifyMailboxes: (ids) =>
-    request('/api/leads/verify', { method: 'POST', body: JSON.stringify({ ids }) }),
+    request('/api/leads/verify', { method: 'POST', body: JSON.stringify({ ids: ids || [], all: true }) }),
   toggleLeadAi: (id) => request(`/api/leads/${id}/toggle-ai`, { method: 'POST' }),
-  manualSend: (leadId, payload) =>
-    request(`/api/leads/${leadId}/send`, { method: 'POST', body: JSON.stringify(payload) }),
+  resolveNeedsHuman: (id, data) =>
+    request(`/api/leads/${id}/needs-human/resolve`, { method: 'POST', body: JSON.stringify(data || {}) }),
+  campaignSubjectPreview: (id, params = {}) => {
+    const q = new URLSearchParams(params).toString()
+    return request(`/api/campaigns/${id}/subject-preview${q ? `?${q}` : ''}`)
+  },
+  manualSend: (leadId, subject, body) =>
+    request(`/api/leads/${leadId}/send`, { method: 'POST', body: JSON.stringify({ subject, body }) }),
 
   // Inbox
   inboxPaged: (params) => request(`/api/inbox${qs(params)}`),
-  thread: (leadId) => request(`/api/inbox/thread/${leadId}`),
-  feed: (params) => request(`/api/inbox/feed${qs(params)}`),
+  thread: (leadId, page = 1, perPage = 20) =>
+    request(`/api/inbox/thread/${leadId}${qs({ page, per_page: perPage })}`),
+  feed: (sinceId, agentId) => request(`/api/inbox/feed${qs({ since_id: sinceId, agent_id: agentId })}`),
 
   // Knowledge
   knowledge: () => request('/api/knowledge'),
@@ -170,6 +234,8 @@ export const api = {
 
   // Settings
   settings: () => request('/api/settings'),
+  getSettings: () => request('/api/settings'),
+  settingsUsage: () => request('/api/settings/usage'),
   saveSettings: (data) => request('/api/settings', { method: 'PUT', body: JSON.stringify(data) }),
 
   // Pitch
@@ -199,13 +265,45 @@ export const api = {
   // Mail Records
   mailRecords: (params) => request(`/api/mail-records${qs(params)}`),
   mailRecordsAgentSummary: () => request('/api/mail-records/summary/agents'),
+  // Batches of 20/30/40/50 grouped by the Excel they came from.
+  mailRecordBatches: (params) => request(`/api/mail-records/batches${qs(params)}`),
   mailRecordsFeed: (params) => request(`/api/mail-records/feed/new${qs(params)}`),
+  mailRecordsExport: async (params, filename = 'mail-records-report.xlsx') => {
+    // Download the Excel report (batch-wise send sheet) with the auth token.
+    const headers = {}
+    const token = getToken()
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    const res = await fetch(`/api/mail-records/export${qs(params)}`, { headers })
+    if (!res.ok) throw new Error(`Export failed (HTTP ${res.status})`)
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = filename
+    document.body.appendChild(a); a.click(); a.remove()
+    URL.revokeObjectURL(url)
+  },
   deleteMailRecord: (id) => request(`/api/mail-records/${id}`, { method: 'DELETE' }),
   purgeMailOlderThan: (days) =>
     request('/api/mail-records/purge-older-than', {
       method: 'POST',
       body: JSON.stringify({ days }),
     }),
+
+  // Escalation — the "a human must decide" queue. Meeting / scheduling links,
+  // promotions, role-account replies (info@/support@/noreply@), system
+  // notifications, delivery failures and any outbound we refused to send.
+  // Never auto-replied to, never in Mail Records, never in Garbage.
+  escalations: (params) => request(`/api/escalations${qs(params)}`),
+  escalationsSummary: () => request('/api/escalations/summary'),
+  escalationFeed: (sinceId) => request(`/api/escalations/feed/new${qs({ since_id: sinceId })}`),
+  escalation: (id) => request(`/api/escalations/${id}`),
+  resumeEscalation: (id) => request(`/api/escalations/${id}/resume`, { method: 'POST' }),
+  deleteEscalation: (id) => request(`/api/escalations/${id}`, { method: 'DELETE' }),
+  bulkDeleteEscalations: (ids) =>
+    request('/api/escalations/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  clearEscalations: () => request('/api/escalations/clear', { method: 'POST' }),
+  purgeEscalations: (days) =>
+    request(`/api/escalations/purge-older-than${qs({ days })}`, { method: 'POST' }),
 
   // Super Admin
   saUsage: (params) => request(`/api/superadmin/usage${qs(params)}`),

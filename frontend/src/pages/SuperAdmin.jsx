@@ -32,13 +32,13 @@ export default function SuperAdmin() {
   const [monPage, setMonPage] = useState(1)
   const [monTab, setMonTab] = useState('outbound') // outbound | inbound | bounced
 
-  const loadUsage = () => { api.saUsage(win).then(setUsage).catch(e => show(e.message, true)) }
+  const loadUsage = () => { api.saUsage({ window: win }).then(setUsage).catch(e => show(e.message, true)) }
   const loadKeys = () => api.saKeys().then(setKeys).catch(() => {})
   const loadSeries = () => api.saUsageSeries(15).then(setSeries).catch(() => {})
   const loadSecretsHealth = () => api.saSecretsHealth().then(setSecretsHealth).catch(() => {})
   const loadBackups = () => api.saBackups().then(setBackups).catch(() => {})
-  const loadAudit = () => api.saAuditLog(auditPage, 20).then(setAudit).catch(e => show(e.message, true))
-  const loadMonitor = () => api.monitoring(monPage, 20).then(setMonitor).catch(() => {})
+  const loadAudit = () => api.saAuditLog({ page: auditPage, per_page: 20 }).then(setAudit).catch(e => show(e.message, true))
+  const loadMonitor = () => api.monitoring({ page: monPage, per_page: 20 }).then(setMonitor).catch(() => {})
 
   useEffect(() => { loadUsage() }, [win])
   useEffect(() => { loadSeries(); loadKeys(); loadSecretsHealth(); loadBackups() }, [])

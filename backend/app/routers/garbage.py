@@ -37,10 +37,17 @@ def delete_one(msg_id: int, db: Session = Depends(get_db)):
 
 @router.post("/bulk-delete")
 def bulk_delete(data: BulkIds, db: Session = Depends(get_db)):
-    n = (db.query(models.EmailMessage)
-         .filter(models.EmailMessage.id.in_(data.ids),
-                 models.EmailMessage.is_spam.is_(True))
-         .delete(synchronize_session=False))
+    if not data.ids:
+        return {"deleted": 0}
+    # Chunked: selecting a whole garbage backlog is thousands of ids and one
+    # IN (...) that size exceeds the Postgres bind-parameter limit -> 500.
+    ids = list(dict.fromkeys(data.ids))[:100000]
+    n = 0
+    for i in range(0, len(ids), 2000):
+        n += (db.query(models.EmailMessage)
+              .filter(models.EmailMessage.id.in_(ids[i:i + 2000]),
+                      models.EmailMessage.is_spam.is_(True))
+              .delete(synchronize_session=False))
     db.commit()
     return {"deleted": n}
 

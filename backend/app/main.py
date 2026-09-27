@@ -1,8 +1,10 @@
+import logging
 from pathlib import Path
 
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
@@ -12,16 +14,43 @@ from .security import current_user
 from . import models
 from .routers import (agents, leads, campaigns, knowledge, auth,
                       inbox, dashboard, garbage, app_settings, superadmin, pitch,
-                      mail_records, unsubscribe)
+                      mail_records, unsubscribe, escalations)
 from .migrate import run_migrations
 from .bootstrap import bootstrap
 from .security_middleware import RateLimitMiddleware, CSRFMiddleware
+from .services import jobs
+
+log = logging.getLogger("chatversio.api")
 
 Base.metadata.create_all(bind=engine,checkfirst=True)
 run_migrations()
 bootstrap()
+# Any import/verify job left mid-flight by a previous process is dead: mark it
+# failed so the Leads page never shows a frozen progress bar.
+jobs.ensure_bootstrap()
 
 app = FastAPI(title=settings.APP_NAME, docs_url="/docs" if settings.DEBUG else None)
+
+
+# --- One JSON shape for every failure -------------------------------------
+# Before this, an unexpected server error returned FastAPI's plain-text
+# "Internal Server Error" body, the browser could not parse it as JSON, and
+# the UI showed a blank failure. Now the frontend always gets {detail} and can
+# toast something readable — and the log keeps the traceback.
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(request: Request, exc: RequestValidationError):
+    first = (exc.errors() or [{}])[0]
+    where = ".".join(str(p) for p in (first.get("loc") or [])[1:]) or "request"
+    return JSONResponse(status_code=422,
+                        content={"detail": f"{where}: {first.get('msg', 'invalid')}",
+                                 "errors": [str(e.get("msg", "")) for e in (exc.errors() or [])[:5]]})
+
+
+@app.exception_handler(Exception)
+async def _unhandled_handler(request: Request, exc: Exception):
+    log.exception("unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500,
+                        content={"detail": f"Server error: {type(exc).__name__}: {exc}"[:400]})
 
 # Allow the configured origin + common local dev origins
 # (localhost, 127.0.0.1, and WSL2/LAN IPs like 172.x.x.x / 192.168.x.x)
@@ -55,7 +84,7 @@ app.include_router(unsubscribe.router)
 app.include_router(superadmin.router)
 PROTECTED = [agents.router, leads.router, campaigns.router, knowledge.router,
              inbox.router, dashboard.router, garbage.router, app_settings.router,
-             pitch.router, mail_records.router]
+             pitch.router, mail_records.router, escalations.router]
 for r in PROTECTED:
     app.include_router(r, dependencies=[Depends(current_user)])
 
@@ -76,6 +105,9 @@ def health():
 
 @app.get("/api/status", dependencies=[Depends(current_user)])
 def status(db: Session = Depends(get_db)):
+    """Capacity panel for the Super Admin / Settings page. The counts are the
+    honest signal of how big this install has grown (80k+ leads is normal now),
+    and the import jobs show whether a background import is mid-flight."""
     return {
         "ok": True, "app": settings.APP_NAME, "redis": _redis_ok(),
         "agents": db.query(models.Agent).count(),
@@ -86,6 +118,16 @@ def status(db: Session = Depends(get_db)):
         "imap_configured": bool(settings.IMAP_USER and settings.IMAP_PASSWORD),
         "otp_enabled": settings.OTP_ENABLED,
         "dkim_configured": bool(settings.DKIM_DOMAIN and settings.DKIM_PRIVATE_KEY_PATH),
+        "capacity": {
+            "leads_total": jobs.raw_count("leads"),
+            "messages_total": jobs.raw_count("email_messages"),
+            "escalations_total": db.query(models.EmailMessage)
+                                 .filter(models.EmailMessage.is_escalation.is_(True)).count(),
+            "imports_running": db.query(models.ImportJob)
+                                .filter(models.ImportJob.status.in_(("queued", "running"))).count(),
+            "import_slots": jobs.MAX_CONCURRENT,
+        },
+        "jobs": jobs.recent_jobs(limit=5),
     }
 
 

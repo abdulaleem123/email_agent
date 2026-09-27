@@ -2,11 +2,13 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api.js'
 import MiniOrb from '../MiniOrb.jsx'
 import { Toast, useToast, useOpenAIKey } from '../App.jsx'
+import ImportProgress, { useImportJob } from '../ImportProgress.jsx'
 import { IconMic, IconUsers, IconRocket, IconArchive, IconTrash } from '../Icons.jsx'
 
 export default function Pitch() {
   const { openaiReady } = useOpenAIKey()
   const aiDisabled = openaiReady === false
+  const imp = useImportJob()
   const [leads, setLeads] = useState([])
   const [agents, setAgents] = useState([])
   const [query, setQuery] = useState('')
@@ -31,6 +33,11 @@ export default function Pitch() {
   const [leadTotal, setLeadTotal] = useState(0)
   const [leadsLoading, setLeadsLoading] = useState(false)
    const [leadSel, setLeadSel] = useState(new Set())
+  const [campaigns, setCampaigns] = useState([])   // "email them through a campaign" — like on Leads
+  const [campaignId, setCampaignId] = useState('')
+  const [emailAgentId, setEmailAgentId] = useState('')
+  const [manual, setManual] = useState(null)      // null = closed, else {name,email,phone,website}
+  const [manualBusy, setManualBusy] = useState(false)
   const loadRecords = useCallback(() => {
     api.pitchRecords(`page=${recPage}&per_page=20`).then(setRecords).catch(e => show(e.message, true))
   }, [recPage, show])
@@ -70,9 +77,12 @@ export default function Pitch() {
 
   useEffect(() => { loadLeads() }, [loadLeads])
   useEffect(() => { setLeadPage(1) }, [query])
+  // A pitch upload interrupted by a refresh comes back on its own.
+  useEffect(() => { imp.adoptRunning() }, [])
 
   useEffect(() => {
     api.agents().then(setAgents).catch(() => {})
+    api.campaigns().then(setCampaigns).catch(() => {})
   }, [])
 
   const [callNotes, setCallNotes] = useState('')
@@ -186,25 +196,37 @@ export default function Pitch() {
     if (!leadTotal) return
     if (!confirm(`Delete ALL ${leadTotal} lead(s) from the Pitch Decker queue? This cannot be undone.`)) return
     try {
-      const ids = []
-      let page = 1, pages = 1
-      while (page <= pages) {
-        const r = await api.leadsPaged(`page=${page}&per_page=200&pitch_pending=true`)
-        const items = r.items || []
-        items.forEach(l => ids.push(l.id))
-        pages = r.pages || 1
-        page += 1
-        if (!items.length) break
-      }
-      if (!ids.length) { show('Queue already empty'); return }
-      for (let i = 0; i < ids.length; i += 500) {
-        await api.bulkDeleteLeads(ids.slice(i, i + 500))
-      }
+      // One server-side statement (keyset-paged internally). The old version
+      // paged the whole queue through the browser and deleted in 500-id
+      // chunks, which is hundreds of round trips and fails halfway on a
+      // large queue.
+      const r = await api.clearPitchQueue()
       setLeads([]); setLeadTotal(0); setLeadSel(new Set())
       setOpen(null); setPitch(null); setHistory([])
-      show(`Deleted ${ids.length} pitch-queue lead(s)`)
+      show(`Deleted ${r.deleted} pitch-queue lead(s)`)
       loadLeads()
     } catch (err) { show(err.message, true) }
+  }
+
+  // Manual lead → add a single pitch lead by hand (popup on the Decker)
+  const saveManual = async () => {
+    if (!manual?.email?.trim()) { show('Email is required', true); return }
+    setManualBusy(true)
+    try {
+      const r = await api.manualPitchLead({
+        name: manual.name, email: manual.email, phone: manual.phone, website: manual.website,
+      })
+      if (r.duplicate) {
+        show('Already in the Pitch queue — not added twice')
+      } else if (r.cross_duplicate) {
+        show(`Added to Pitch Decker — email also in Excel (shown as duplicate)${r.email_verified ? '' : ' · unverified'}`)
+      } else {
+        show(`Added to Pitch Decker${r.email_verified ? '' : ' · email unverified'}`)
+      }
+      setManual(null)
+      loadLeads()
+    } catch (err) { show(err.message || String(err), true) }
+    finally { setManualBusy(false) }
   }
 
   // Get back = undo mark-done → lead returns to main Pitch list
@@ -219,8 +241,35 @@ export default function Pitch() {
 
   const lines = (pitch?.transcript || '').split('\n').filter(l => l.trim())
 
+  const enrollSelectedToCampaign = async () => {
+    if (!leadSel.size) { show('Select leads first', true); return }
+    if (!campaignId) { show('Pick a campaign', true); return }
+    if (!emailAgentId) { show('Pick an agent to send as', true); return }
+    setBusy(true)
+    try {
+      const ids = [...leadSel]
+      const r = await api.enroll(ids, +campaignId, +emailAgentId)
+      const blockedIds = new Set((r.blocked || []).map(b => b.lead_id))
+      const goIds = ids.filter(id => !blockedIds.has(id))
+      let msg = ''
+      if (goIds.length) {
+        const rl = await api.launch(+campaignId, goIds)
+        msg = `Enrolled ${goIds.length} → queued in ${rl.batches?.length || 0} batch(es) of ~${rl.batch_size} (FIFO)`
+      } else {
+        msg = 'Nothing could be emailed (all already contacted)'
+      }
+      if (r.blocked?.length) msg += ` · ${r.blocked.length} blocked/skipped`
+      show(msg)
+      setLeadSel(new Set())
+      loadLeads()
+    } catch (e) { show(e.message, true) } finally { setBusy(false) }
+  }
+
   return (
     <>
+      {/* Queued pitch import progress (adopts a running job after a refresh). */}
+      {!showAll && <ImportProgress job={imp.job} onDone={loadLeads} onDismiss={imp.reset} />}
+
       <div className="pitch-intro card mb">
         <MiniOrb size={52} color="#0054FC" accent="#00BAFF" />
         <div style={{ flex: 1 }}>
@@ -235,8 +284,8 @@ export default function Pitch() {
           </p>
         </div>
                 <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-          <label className="btn primary small" style={{ cursor: 'pointer', margin: 0 }}>
-            + Upload Excel / CSV
+          <label className="btn primary small" style={{ cursor: imp.active ? 'wait' : 'pointer', margin: 0, opacity: imp.active ? 0.6 : 1 }}>
+            {imp.active ? 'Import running…' : '+ Upload Excel / CSV'}
             <input
               type="file"
               accept=".xlsx,.xls,.csv"
@@ -246,15 +295,21 @@ export default function Pitch() {
                 e.target.value = ''
                 if (!file) return
                 try {
+                  // Queued import — the POST returns a job id in milliseconds
+                  // and the progress bar below tracks it to the end. Refresh
+                  // the Decker list once it reports done.
                   const r = await api.uploadLeads(file, null, null, 'pitch')
-                  show(`Pitch queue: ${r.created} added · ${r.skipped_duplicates || 0} dupes · ${r.unverified || 0} unverified`)
-                  loadLeads()
+                  if (r?.job_id) { imp.watch(r.job_id); show(`${file.name} queued for the Pitch Decker`) }
+                  else loadLeads()
                 } catch (err) {
                   show(err.message || String(err), true)
                 }
               }}
             />
           </label>
+          <button className="btn small" style={{ marginLeft: 0 }} onClick={() => setManual({ name: '', email: '', phone: '', website: '' })}>
+            + Manual lead
+          </button>
           <button className="btn ghost small" onClick={() => setShowAll(s => !s)}>
             {showAll ? '← Back to Decker' : <><IconArchive /> All pitches</>}
           </button>
@@ -356,9 +411,23 @@ export default function Pitch() {
             <input placeholder="Search leads…" value={query} onChange={e => setQuery(e.target.value)} />
           </div>
           <div className="row mb" style={{ gap: 8, padding: '0 10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="sm mut" style={{ marginRight: 4 }}>Send via campaign:</span>
+            <select style={{ width: 180 }} value={campaignId} onChange={e => setCampaignId(e.target.value)} title="Email these leads through which campaign">
+              <option value="">Campaign…</option>
+              {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <select style={{ width: 150 }} value={emailAgentId} onChange={e => setEmailAgentId(e.target.value)} title="Send as which agent">
+              <option value="">Agent…</option>
+              {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+            <button className="btn small" disabled={!leadSel.size || !campaignId || !emailAgentId || busy || aiDisabled}
+                    title={aiDisabled ? 'OpenAI API key required' : 'Enroll selected lead(s) into the campaign & queue their emails'}
+                    onClick={enrollSelectedToCampaign}>
+              <IconRocket /> Email {leadSel.size ? `${leadSel.size} ` : ''}selected
+            </button>
             {leadSel.size > 0 && (
               <>
-                <span className="sm mut">{leadSel.size} selected</span>
+                <span className="sm mut" style={{ marginLeft: 4 }}>{leadSel.size} selected</span>
                 <button className="btn danger small" onClick={removeSelectedPitchLeads}>
                   <IconTrash /> Delete selected
                 </button>
@@ -388,6 +457,9 @@ export default function Pitch() {
                   <b className="ellipsis">{l.name || l.email}</b>
                   <div className="sm mut ellipsis">{l.company || '—'} · {l.country || '—'}</div>
                 </div>
+                {l.dup_in_excel && (
+                  <span className="pill" style={{ background: '#fef3c7', color: '#b45309' }} title="Same email also exists in the Excel outreach list">dup</span>
+                )}
                 <span className={`pill ${l.temperature}`}>{l.temperature}</span>
                 <button
                   className="icon-btn"
@@ -472,6 +544,9 @@ export default function Pitch() {
                 <div className="row wrap mb sm" style={{ marginTop: 4 }}>
                   <span className="pill blue">☎ {open.phone || 'no phone'}</span>
                   <span className="pill gray">✉ {open.email}</span>
+                  {open.dup_in_excel && (
+                    <span className="pill" style={{ background: '#fef3c7', color: '#b45309' }}>duplicate · also in Excel</span>
+                  )}
                   <span className="pill gray">{open.country || 'unknown region'}</span>
                   {open.website && (
                     <a className="pill gray" href={open.website.startsWith('http') ? open.website : `https://${open.website}`}
@@ -564,6 +639,48 @@ export default function Pitch() {
           )}
         </div>
       </div>
+      )}
+      {manual && (
+        <div className="modal-veil" onClick={e => e.target === e.currentTarget && !manualBusy && setManual(null)}>
+          <div className="card">
+            <b>Add a manual lead to Pitch Decker</b>
+            <p className="sm mut mt">
+              Added straight to the Pitch queue (separate from the Excel outreach list).
+              If the same email already exists in Excel it still gets added here and is
+              flagged as a duplicate. Same email can't be added to the Pitch queue twice.
+            </p>
+            <div className="field mt">
+              <label>Name</label>
+              <input value={manual.name}
+                     onChange={e => setManual(s => ({ ...s, name: e.target.value }))}
+                     placeholder="e.g. Sarah Thompson" autoFocus />
+            </div>
+            <div className="field mt">
+              <label>Email <span style={{ color: 'var(--hot)' }}>*</span></label>
+              <input value={manual.email}
+                     onChange={e => setManual(s => ({ ...s, email: e.target.value }))}
+                     placeholder="sarah@company.com" />
+            </div>
+            <div className="field mt">
+              <label>Phone number</label>
+              <input value={manual.phone}
+                     onChange={e => setManual(s => ({ ...s, phone: e.target.value }))}
+                     placeholder="+1 555 123 4567" />
+            </div>
+            <div className="field mt">
+              <label>Website</label>
+              <input value={manual.website}
+                     onChange={e => setManual(s => ({ ...s, website: e.target.value }))}
+                     placeholder="company.com" />
+            </div>
+            <div className="row mt">
+              <button className="btn" disabled={manualBusy || !manual.email.trim()} onClick={saveManual}>
+                {manualBusy ? <><span className="spinner" /> Saving…</> : 'Save to Pitch Decker'}
+              </button>
+              <button className="btn ghost" disabled={manualBusy} onClick={() => setManual(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
       )}
       <Toast toast={toast} />
     </>

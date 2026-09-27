@@ -3,18 +3,20 @@ import { api } from '../api.js'
 import MiniOrb from '../MiniOrb.jsx'
 import { Toast, useToast, useOpenAIKey } from '../App.jsx'
 import Counter from '../Counter.jsx'
+import ImportProgress, { useImportJob } from '../ImportProgress.jsx'
 import { IconUsers, IconPlus, IconTrash, IconRefresh, IconSearch, IconRocket } from '../Icons.jsx'
  
 /**
  * Leads — the queue of people your agents will reach out to.
  *
- * Non-technical explainer at the top. Paginated (25/page, server-side) so
- * 50 000-row sheets don't freeze the browser. Bulk delete + auto-purge for
- * completed leads keeps the DB slim. Agent assignment happens at enrollment.
+ * Built for 80 000+ leads: server-side paging everywhere, every bulk action
+ * set-based on the server, and uploads/verification run as QUEUED background
+ * jobs with a live progress bar instead of a request that hangs and then 500s.
  */
 export default function Leads() {
   const { openaiReady } = useOpenAIKey()
   const aiDisabled = openaiReady === false
+  const imp = useImportJob()
   const [data, setData] = useState({ items: [], total: 0, page: 1, per_page: 25 })
   const [stats, setStats] = useState(null)
   const [page, setPage] = useState(1)
@@ -22,6 +24,10 @@ export default function Leads() {
   const [status, setStatus] = useState('')
   const [unverifiedOnly, setUnverifiedOnly] = useState(false)
   const [unassignedOnly, setUnassignedOnly] = useState(false)
+  // Threads the agent refused to answer (price / contract / legal / security)
+  // and leads that said "not interested". Both are dead to the agent — this is
+  // where you find out what it stopped on.
+  const [humanOnly, setHumanOnly] = useState('')
   const [q, setQ] = useState('')
   const [debouncedQ, setDebouncedQ] = useState('')
   const [campaigns, setCampaigns] = useState([])
@@ -34,6 +40,17 @@ export default function Leads() {
   const [busy, setBusy] = useState(false)
   const [verifying, setVerifying] = useState(false)
   const [showHow, setShowHow] = useState(false)
+  // Which Excel / which batch this view is about. Both feed straight into
+  // "Enroll all matching", so a sheet (or a single 20/30/40/50 batch of it) can
+  // be launched on its own without re-selecting rows.
+  const [sourceFiles, setSourceFiles] = useState([])
+  const [sourceFile, setSourceFile] = useState('')
+  const [batchFilter, setBatchFilter] = useState('')
+  // Batch size is NOT chosen here. It lives on the Settings page (one knob for
+  // the whole system); this page only shows what it currently is, read-only, so
+  // it is never a mystery why an upload split the way it did.
+  const [batchSize, setBatchSize] = useState(0)   // 0 = "use the Settings value"
+  const [autoEnroll, setAutoEnroll] = useState(true)      // import = enroll + start sending right away
   const fileRef = useRef()
   const [toast, show] = useToast()
  
@@ -41,7 +58,7 @@ export default function Leads() {
     const t = setTimeout(() => setDebouncedQ(q.trim()), 300)
     return () => clearTimeout(t)
   }, [q])
-  useEffect(() => { setPage(1) }, [status, debouncedQ, unverifiedOnly, unassignedOnly, agentId])
+  useEffect(() => { setPage(1) }, [status, debouncedQ, unverifiedOnly, unassignedOnly, agentId, humanOnly, sourceFile, batchFilter])
  
   const load = useCallback(async () => {
     const params = new URLSearchParams({ page, per_page: perPage })
@@ -49,47 +66,74 @@ export default function Leads() {
     if (debouncedQ) params.set('q', debouncedQ)
     if (unverifiedOnly) params.set('unverified_only', 'true')
     if (unassignedOnly) params.set('unassigned_only', 'true')
+    if (humanOnly) params.set(humanOnly, 'true')
     if (agentId) params.set('agent_id', agentId)
+    if (sourceFile) params.set('source_file', sourceFile)
+    if (batchFilter) params.set('batch_id', batchFilter)
     try {
-      const [d, s, cs, ag] = await Promise.all([
+      const [d, s, cs, ag, st] = await Promise.all([
         api.leadsPaged(params.toString()),
         api.leadsStats(),
         api.campaigns(),
         api.agents(),
+        api.getSettings().catch(() => null),
       ])
       setData(d); setStats(s); setCampaigns(cs); setAgents(ag)
+      if (st) setBatchSize(+(st.email_batch_size || 0))
       if (cs.length && !campaignId) setCampaignId(String(cs[0].id))
     } catch (e) { show(e.message, true) }
-  }, [page, status, debouncedQ, campaignId, agentId, unassignedOnly, unverifiedOnly, show])
+  }, [page, status, debouncedQ, campaignId, agentId, unassignedOnly, unverifiedOnly, humanOnly, sourceFile, batchFilter, show])
  
   useEffect(() => { load() }, [load])
+
+  // The Excel files that have batches, for the "one sheet at a time" filter.
+  useEffect(() => {
+    api.mailRecordBatches({ limit: 200 })
+      .then(d => setSourceFiles(d?.source_files || []))
+      .catch(() => {})
+  }, [data.total, imp.job?.status])
  
   const upload = async (e) => {
     const file = e.target.files[0]
     if (!file) return
+    // Auto-enroll only makes sense with a real campaign + agent, otherwise the
+    // leads are imported and queued as bundles for a manual launch later.
+    const enroll = autoEnroll && !!campaignId && !!agentId
+    if (autoEnroll && (!campaignId || !agentId))
+      show('Pick a campaign AND an agent first — importing without both just stores the leads', true)
     setBusy(true)
     try {
-      // If an agent + campaign are picked in the toolbar, leads land already
-      // enrolled with that agent — no one-by-one assigning.
-      const r = await api.uploadLeads(file, agentId || undefined, campaignId || undefined)
-      const where = r.assigned_to_agent
-        ? ` · auto-assigned to ${agents.find(a => a.id === +agentId)?.name || 'agent'}`
-        : ''
-      show(`Imported ${r.created} leads · ${r.skipped_duplicates} dup skipped${where}`)
-      load()
+      // The POST only queues the work: it returns 202 + job_id in milliseconds
+      // and the progress bar below follows the job to the end.
+      const r = await api.uploadLeads(file, agentId || undefined, campaignId || undefined, 'excel', null, enroll)
+      if (r?.job_id) {
+        imp.watch(r.job_id)
+        show(`${file.name} queued — ${r.batch_size || batchSize}-lead bundles`)
+      } else {
+        show('Upload finished', true)
+        load()
+      }
     } catch (ex) { show(ex.message, true) } finally { setBusy(false); e.target.value = '' }
   }
+
+  // A refresh (or another tab) must not lose a running import.
+  useEffect(() => { imp.adoptRunning() }, [])
  
   const verifyMailboxes = async () => {
-    setVerifying(true); setBusy(true)
-    try { const r = await api.verifyMailboxes(); show(`Checked ${r.checked}: ${r.confirmed} confirmed, ${r.still_unverified} unverified`); load() }
-    catch (ex) { show(ex.message, true) } finally { setVerifying(false); setBusy(false) }
+    setVerifying(true)
+    try {
+      // Queued too: MX lookups are DNS round trips, and doing 500 of them
+      // inside the request is exactly what used to time out into a 500.
+      const r = await api.verifyMailboxes()
+      if (r?.job_id) { imp.watch(r.job_id); show('Mailbox verification queued') }
+      else load()
+    } catch (ex) { show(ex.message, true) } finally { setVerifying(false) }
   }
  
   const bulkGarbage = async () => {
     if (!sel.size) return
     setBusy(true)
-    try { const r = await api.bulkGarbageLeads([...sel]); show(`Moved ${r.moved} lead(s) → Garbage`); setSel(new Set()); load() }
+    try { const r = await api.bulkGarbageLeads([...sel]); show(`Moved ${r.moved} lead(s) → Trash`); setSel(new Set()); load() }
     catch (ex) { show(ex.message, true) } finally { setBusy(false) }
   }
  
@@ -111,9 +155,9 @@ export default function Leads() {
   }
  
   const moveUnverifiedToGarbage = async () => {
-    if (!confirm('Move ALL unverified leads to Garbage? They are not deleted — you can review or restore them in Garbage.')) return
+    if (!confirm('Move ALL unverified leads to Trash? They are not deleted — you can review or restore them from Trash.')) return
     setBusy(true)
-    try { const r = await api.unverifiedToGarbage(); show(`Moved ${r.moved} unverified lead(s) to Garbage`); load() }
+    try { const r = await api.unverifiedToGarbage(); show(`Moved ${r.moved} unverified lead(s) to Trash`); load() }
     catch (ex) { show(ex.message, true) } finally { setBusy(false) }
   }
  
@@ -144,6 +188,10 @@ export default function Leads() {
     try {
       const r = await api.enroll([lead.id], +campaignId, +chosenAgentId)
       if (r.blocked?.length) { setBlockedInfo(r.blocked); return }
+      if (r.handed_over) {
+        show(`${lead.name || lead.email} handed over — the sequence continues as follow-ups (no new cold email)`)
+        load(); return
+      }
       const rl = await api.launch(+campaignId, [lead.id])
       show(`${lead.name || lead.email} enrolled with ${agents.find(a => a.id === +chosenAgentId)?.name || 'agent'} — queued`)
       load()
@@ -160,10 +208,14 @@ export default function Leads() {
         setBlockedInfo(r.blocked)
       }
       const blockedIds = new Set((r.blocked || []).map(b => b.lead_id))
-      const goIds = ids.filter(id => !blockedIds.has(id))
+      const overIds = new Set(r.handed_over_ids || [])
+      const goIds = ids.filter(id => !blockedIds.has(id) && !overIds.has(id))
       if (goIds.length) {
         const rl = await api.launch(+campaignId, goIds)
-        show(`Queued ${rl.queued} emails in ${rl.batches?.length || 0} batch(es) of ~${rl.batch_size}`)
+        show(`Queued ${rl.queued} emails in ${rl.batches?.length || 0} batch(es) of ~${rl.batch_size}`
+             + (r.handed_over ? ` · ${r.handed_over} handed over (follow-ups continue)` : ''))
+      } else if (r.handed_over) {
+        show(`${r.handed_over} lead(s) handed over — sequence continues as follow-ups`)
       } else if (!r.blocked?.length) {
         show('Nothing to enroll', true)
       }
@@ -182,17 +234,22 @@ export default function Leads() {
     if (!confirm(`Enroll ALL ${data.total} matching lead(s) into this campaign with ${who}? They queue in batches automatically.`)) return
     setBusy(true)
     try {
+      // The whole filter is resolved SERVER-side: "enroll all matching" must
+      // cover every page, not the 25 rows currently rendered. Sending
+      // 80 000 ids from the browser is what used to blow up the request.
       const r = await api.enrollByFilter({
-        campaign_id: +campaignId,
-        agent_id: +agentId,
         status: status || undefined,
         // when filtering to unassigned leads, don't also restrict by a current
         // agent (they'd contradict) — we're assigning them FOR THE FIRST TIME
-        filter_agent_id: (!unassignedOnly && agentId) ? +agentId : undefined,
+        agent_id: (!unassignedOnly && agentId) ? +agentId : undefined,
         unverified_only: unverifiedOnly,
         unassigned_only: unassignedOnly,
+        needs_human_only: humanOnly === 'needs_human_only',
+        not_interested_only: humanOnly === 'not_interested_only',
+        source_file: sourceFile || undefined,
+        batch_id: batchFilter || undefined,
         q: debouncedQ || '',
-      })
+      }, +campaignId, +agentId)
       show(`Enrolled ${r.enrolled} · queued in ${r.batches?.length || 0} batch(es) of ~${r.batch_size}` +
            (r.blocked_count ? ` · ${r.blocked_count} skipped (24h lock)` : ''))
       setSel(new Set()); load()
@@ -255,17 +312,20 @@ export default function Leads() {
       {blockedInfo && (
         <div className="modal-veil" onClick={e => e.target === e.currentTarget && setBlockedInfo(null)}>
           <div className="card">
-            <b style={{ color: 'var(--hot)' }}>⚠ {blockedInfo.length} lead(s) already claimed today</b>
+            <b style={{ color: 'var(--hot)' }}>⚠ {blockedInfo.length} lead(s) owned by another agent</b>
             <p className="sm mut mt">
-              Another agent already emailed these leads today — the same-day lock means
-              only they can send to these leads until it resets tomorrow.
+              While an agent is actively communicating with a lead, nobody else can take it.
+              A paused agent, or one that stays silent past the ownership timeline
+              (Settings → Lead ownership), releases its leads automatically.
             </p>
             <div className="mt" style={{ maxHeight: 240, overflowY: 'auto' }}>
               {blockedInfo.map(b => (
                 <div key={b.lead_id} className="row between sm" style={{ padding: '8px 0', borderBottom: '1px solid var(--line)' }}>
                   <span>{b.email}</span>
                   <span className="mut">
-                    owned by <b>{b.owned_by}</b> · unlocks {new Date(b.unlock_at + 'Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    <b>{b.owned_by}</b> · {/^\d{4}-\d{2}-\d{2}/.test(b.unlock_at || '')
+                      ? `unlocks ${new Date(b.unlock_at + 'Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+                      : (b.unlock_at || '')}
                   </span>
                 </div>
               ))}
@@ -283,8 +343,8 @@ export default function Leads() {
             <li><b>Verify</b> — click "Verify mailboxes (SMTP)" to check which addresses actually exist before you send.</li>
             <li><b>Select</b> — tick the leads you want to reach out to. Filter by status or search by name/email.</li>
             <li><b>Pick a campaign & agent</b> — the agent decides tone, mailbox, signature, and reply style. Leave "Any agent" for round-robin.</li>
-            <li><b>Enroll & launch</b> — leads split into batches of ~20-50. Each batch spaces emails 1-5 min apart.</li>
-            <li><b>24-hour agent lock</b> — once an agent actually emails a lead, no other agent can enroll or email that same lead for 24 hours. The Agent column shows 🔒 with the exact unlock time; the per-row agent dropdown only offers the owning agent while it's locked. After 24 hours it opens up to any agent again.</li>
+            <li><b>Enroll &amp; launch</b> — leads are bundled (20 / 30 / 40 / 50 — pick it before uploading) and emails go out one at a time, in order, spaced by the agent's outbound delay. <b>Auto-enroll on upload</b> does all of it the moment you drop a file in with a campaign + agent picked.</li>
+            <li><b>Lead ownership</b> — a lead belongs to the agent it is talking to. While they communicate, no other agent can enroll it (the blocked list names the owner). <b>Pause an agent</b> and its leads become available at once; an agent that stays silent past the ownership timeline (Settings → Lead ownership, default 7 days) loses its leads too. A taken-over lead continues as follow-ups with the new agent — never a second cold email.</li>
             <li><b>Filter by agent</b> — the "Any agent" dropdown above both filters the list to that agent's leads AND sets who gets used for bulk Enroll &amp; launch.</li>
             <li><b>Watch replies</b> — inbound answers land in <b>Messages</b>. The agent auto-replies ~15 min later, KB-first. You can take over anytime.</li>
             <li><b>Housekeeping</b> — delete leads one-by-one, in bulk, or purge everything older than X days. Old completed leads never bog the DB down.</li>
@@ -292,19 +352,51 @@ export default function Leads() {
         </div>
       )}
  
+      {/* Live progress for the queued import / verification job. Adopts a job
+          that is already running (page refresh) and shows the server's real
+          phase + counters until it finishes. */}
+      <ImportProgress job={imp.job} onDone={load} onDismiss={imp.reset} />
+
       {/* Toolbar */}
       <div className="row between mb wrap" style={{ gap: 10 }}>
         <div className="row" style={{ gap: 8 }}>
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={upload} style={{ display: 'none' }} />
-          <button className="btn" disabled={busy} onClick={() => fileRef.current.click()}>
-            <IconPlus /> {busy && !verifying ? 'Uploading…' : 'Upload Excel / CSV'}
+          <button className="btn" disabled={busy || imp.active} onClick={() => fileRef.current.click()}>
+            <IconPlus /> {imp.active ? 'Import running…' : 'Upload Excel / CSV'}
           </button>
-          <button className="btn ghost small" disabled={busy || data.items.length === 0} onClick={verifyMailboxes}>
-            {verifying ? 'Verifying (DNS + SMTP)… please wait' : 'Verify mailboxes'}
+          <span className="sm mut" title="Batch size is set once on the Settings page (Email batch size) and applies to every upload, campaign and manual launch">
+            bundles of {batchSize || '…'}
+          </span>
+          {!!sourceFiles.length && (
+            <select value={sourceFile} onChange={e => {
+              setSourceFile(e.target.value); setBatchFilter('')
+            }} style={{ maxWidth: 190 }}
+                    title="Work one Excel file at a time — Enroll all matching then launches only this file's leads">
+              <option value="">All Excel files</option>
+              {sourceFiles.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+          )}
+          {batchFilter && (
+            <button className="btn ghost small" onClick={() => setBatchFilter('')}>
+              Clear batch filter
+            </button>
+          )}
+          <label className="chk" title="Pick a campaign AND an agent, then uploading enrolls every new lead and starts sending — one bundle at a time, in order">
+            <input type="checkbox" checked={autoEnroll} onChange={e => setAutoEnroll(e.target.checked)} />
+            Auto-enroll on upload
+          </label>
+          {autoEnroll && (!campaignId || !agentId) && (
+            <span className="sm mut">
+              needs {campaignId ? 'an agent' : 'a campaign + an agent'} in the toolbar →
+            </span>
+          )}
+          <button className="btn ghost small" disabled={busy || imp.active} onClick={verifyMailboxes}
+                  title="Resolve the MX record of every unverified lead's domain (one lookup per domain, not per lead)">
+            {verifying || imp.job?.kind === 'verify' ? 'Verifying…' : 'Verify mailboxes'}
           </button>
           <button className="btn ghost small" disabled={busy} onClick={moveUnverifiedToGarbage}
-                  title="Move every unverified lead into Garbage (reviewable, not deleted)">
-            Unverified → Garbage
+                  title="Move every unverified lead into Trash (reviewable, not deleted)">
+            Unverified → Trash
           </button>
           <button className="btn ghost small" disabled={busy} onClick={() => setPurgeDays('60')}>
             Purge old…
@@ -360,6 +452,20 @@ export default function Leads() {
                   title="Show only leads not yet assigned to any agent — then 'Enroll all matching' to assign them all at once">
             Unassigned only
           </button>
+          <div className="seg">
+            {[['', 'Agent silent'], ['needs_human_only', 'Needs a human'],
+              ['not_interested_only', 'Not interested']].map(([k, label]) => (
+              <button key={k || 'none'} className={humanOnly === k ? 'on' : ''}
+                      onClick={() => setHumanOnly(humanOnly === k ? '' : k)}
+                      title={k === 'needs_human_only'
+                        ? 'The agent stopped on these: they asked about price, a contract, legal, security or who the company is. The thread stays in Messages so you can answer it.'
+                        : k === 'not_interested_only'
+                          ? 'They said they are not interested. The agent sent nothing back, the lead went Cold and sits in Trash — the conversation stays in Messages. They get deleted after the retention window.'
+                          : 'Show every lead again'}>
+                {label}
+              </button>
+            ))}
+          </div>
           {sel.size > 0 && (
             <div className="row" style={{ gap: 6, alignItems: 'center' }}>
               <select value={bulkAgent} onChange={e => setBulkAgent(e.target.value)}
@@ -376,8 +482,8 @@ export default function Leads() {
           )}
           {sel.size > 0 && (
             <button className="btn small" onClick={bulkGarbage} disabled={busy}
-                    title="Move the selected leads straight to Garbage">
-              Move {sel.size} → Garbage
+                    title="Move the selected leads straight to Trash">
+              Move {sel.size} → Trash
             </button>
           )}
           {sel.size > 0 && (
@@ -432,7 +538,7 @@ export default function Leads() {
                           🔒 next available {new Date(l.locked_until + 'Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                         </div>
                       )}
-                      {['new', 'enrolled'].includes(l.status) && (
+                        {['new', 'enrolled', 'contacted'].includes(l.status) && (
                         <div className="row" style={{ gap: 4, marginTop: 4 }}>
                           <select style={{ width: 110, padding: '4px 6px', fontSize: 12 }}
                                   value={rowAgentSel[l.id] ?? ''}
@@ -449,7 +555,23 @@ export default function Leads() {
                         </div>
                       )}
                     </td>
-                    <td><span className={`pill ${l.status === 'replied' ? 'ok' : l.status === 'contacted' ? 'blue' : 'gray'}`}>{l.status}</span></td>
+                    <td>
+                      <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+                        <span className={`pill ${l.status === 'replied' ? 'ok' : l.status === 'contacted' ? 'blue' : 'gray'}`}>{l.status}</span>
+                        {l.needs_human && (
+                          <span className="pill" style={{ background: '#fef3c7', color: '#b45309' }}
+                                title={(l.needs_human_reason || 'A human has to answer this').replace(/^needs-human:/, '')}>
+                            Human needed
+                          </span>
+                        )}
+                        {l.not_interested && (
+                          <span className="pill" style={{ background: '#e5e7eb', color: '#4b5563' }}
+                                title={l.not_interested_note || 'Said not interested — agent is silent, deleted after the retention window'}>
+                            Not interested
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td><span className={`pill ${l.temperature}`}>{l.temperature}</span></td>
                     <td className="sm mut" style={{ maxWidth: 260 }}>
                       {l.pain_points ? l.pain_points.slice(0, 100) + '…' : <i>none yet</i>}
@@ -475,6 +597,7 @@ export default function Leads() {
         <span className="sm mut">Page {data.page} of {totalPages} · {data.total} leads</span>
         <button className="btn ghost small" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>Next →</button>
       </div>
+
       <Toast toast={toast} />
     </>
   )

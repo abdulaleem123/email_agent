@@ -433,10 +433,14 @@ def send_email(to_addr: str, subject: str, body: str,
     # opt-out line in the body (below) — a working link, just not a header
     # Gmail's UI treats as a bulk-sender signal.
     plain_body = body
-    # if unsub_token:
-    #     unsub_url = f"{settings.PUBLIC_API_URL}/api/unsub/{unsub_token}"
-    #     plain_body = f"{body}\n\n---\nNo longer interested? {unsub_url}"
-    plain_body = body
+    # UNSUBSCRIBE LINK — off by default (the campaign's "Unsubscribe" part of
+    # the selection box is ticked by default, which removes it). Only when a
+    # campaign deliberately unticks that part does an opt-out line go out, and
+    # then it is plain text rather than the List-Unsubscribe header, so Gmail
+    # never shows the bulk-sender "Unsubscribe" pill.
+    if unsub_token:
+        unsub_url = f"{settings.PUBLIC_API_URL}/api/unsub/{unsub_token}"
+        plain_body = f"{body}\n\nNo longer interested? {unsub_url}"
     msg.attach(MIMEText(plain_body, "plain", "utf-8"))
     if use_html_template:
         msg.attach(MIMEText(render_html_template(plain_body, display), "html", "utf-8"))
@@ -486,12 +490,20 @@ def _extract_body(msg) -> str:
                           errors="replace") if payload else ""
 
 
-def fetch_unseen(creds: dict | None = None) -> list[dict]:
-    """Fetch unseen messages from ONE mailbox (per-agent creds or global)."""
+def fetch_unseen(creds: dict | None = None, limit: int | None = None) -> list[dict]:
+    """Fetch unseen messages from ONE mailbox (per-agent creds or global).
+
+    limit = how many messages this call may read. It is deliberately a
+    parameter and not a hardcoded number: the Settings page controls it
+    ("email poll size"), because a big backlog pulled in one IMAP session is
+    slow and holds the connection open. Whatever is left stays UNSEEN and is
+    picked up on the next cycle."""
     if creds is None:
         creds = imap_creds_for(None)
     if not creds or not creds.get("user"):
         return []
+    if limit is None or limit <= 0:
+        limit = 100
     results = []
     with imaplib.IMAP4_SSL(creds["host"], creds["port"]) as im:
         im.login(creds["user"], creds["password"])
@@ -499,7 +511,7 @@ def fetch_unseen(creds: dict | None = None) -> list[dict]:
         status, data = im.search(None, "UNSEEN")
         if status != "OK":
             return []
-        for num in data[0].split()[:50]:
+        for num in data[0].split()[:limit]:
             status, msg_data = im.fetch(num, "(RFC822)")
             if status != "OK":
                 continue

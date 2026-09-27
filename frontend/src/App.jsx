@@ -5,6 +5,7 @@ import {
   IconGrid, IconMail, IconBot, IconRocket, IconMic, IconUsers, IconBook,
   IconTrash, IconGear, IconChevronsLeft, IconChevronsRight,
   IconBell, IconSearch, IconLogout, IconShield, IconArchive, IconChevronDown,
+  IconFlag,
 } from './Icons.jsx'
 import Login from './pages/Login.jsx'
 import Dashboard from './pages/Dashboard.jsx'
@@ -18,17 +19,19 @@ import Settings from './pages/Settings.jsx'
 import SuperAdmin from './pages/SuperAdmin.jsx'
 import Pitch from './pages/Pitch.jsx'
 import MailRecords from './pages/MailRecords.jsx'
+import Escalations from './pages/Escalations.jsx'
 
 const NAV = [
   ['dashboard', IconGrid, 'Dashboard'],
   ['inbox', IconMail, 'Messages'],
+  ['escalations', IconFlag, 'Escalation'],
   ['records', IconArchive, 'Mail Records'],
   ['agents', IconBot, 'Agents'],
   ['campaigns', IconRocket, 'Campaigns'],
   ['pitch', IconMic, 'Pitch Decker'],
   ['leads', IconUsers, 'Leads'],
   ['knowledge', IconBook, 'Knowledge'],
-  ['garbage', IconTrash, 'Garbage'],
+  ['garbage', IconTrash, 'Trash'],
   ['settings', IconGear, 'Settings'],
 ]
 
@@ -150,6 +153,7 @@ function NavSearch({ onNavigate }) {
     ['inbox', 'Open Messages', 'inbox'],
     ['mail records', 'Open Mail Records', 'records'],
     ['records', 'Open Mail Records', 'records'],
+    ['escalation', 'Open Escalation', 'escalations'],
     ['pitch', 'Open Pitch Decker', 'pitch'],
     ['agents', 'Manage Agents', 'agents'],
     ['knowledge', 'Knowledge base', 'knowledge'],
@@ -292,6 +296,7 @@ export default function App() {
     dashboard: Dashboard, inbox: Inbox, records: MailRecords, agents: Agents,
     campaigns: Campaigns, leads: Leads, knowledge: Knowledge, garbage: Garbage,
     settings: Settings, pitch: Pitch, superadmin: SuperAdmin,
+    escalations: Escalations,
   }[page] || Dashboard
   const title = nav.find(n => n[0] === page)?.[2] || ''
 
