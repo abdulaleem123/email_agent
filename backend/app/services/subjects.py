@@ -2,7 +2,11 @@
 
 Rules the whole product agreed on, enforced in code rather than in a prompt:
 
-- MAXIMUM 3 WORDS. Longer subjects are where "this reads like an ad" starts.
+- 3 TO 4 WORDS, no more. Four is the ceiling; three is the normal case. Longer
+  than that is where "this reads like an ad" starts.
+- Professional and clear: an operational noun phrase a colleague would file
+  under a real topic ("Response time gap"), never a hook, a tease or a casual
+  aside ("Worth a look", "Something we noticed").
 - First letter uppercase, rest left alone. No ALL CAPS, no title-casing soup.
 - No exclamation marks, no "Re:", no banned openers (Noticing / Checking in /
   Quick question / Following up / Just checking / Opportunity / Hope you're).
@@ -13,22 +17,22 @@ Rules the whole product agreed on, enforced in code rather than in a prompt:
   the same campaign does not send the same subject line to a German logistics
   firm and a US dental group.
 
-The LLM is NOT asked for a subject at all. It is a 3-word, region-aware,
+The LLM is NOT asked for a subject at all. It is a 3-4 word, region-aware,
 deduplicated string — a template bank plus a hard normaliser is both faster and
 far more consistent than asking a model every time and hoping.
 """
 import re
 
-MAX_WORDS = 3
+MAX_WORDS = 4
 
 
 def subject_word_cap(campaign) -> int:
     """The word cap actually in force for this campaign.
 
-    3 WORDS MAXIMUM whenever the Subject part of the campaign's selection box
+    4 WORDS MAXIMUM whenever the Subject part of the campaign's selection box
     is ticked — which is the default, and what the default Agent prompt says.
-    Untick it and the campaign's own configured limit stands. No campaign at
-    all: the house rule of 3."""
+    Untick it and the campaign's own configured limit stands, still clamped by
+    the house ceiling. No campaign at all: the house rule of 4."""
     from . import agent_settings
     if campaign is None:
         return MAX_WORDS
@@ -99,12 +103,14 @@ _ANGLES: list[tuple[tuple[str, ...], list[str]]] = [
       "Handover gaps"]),
 ]
 
-# Generic fallbacks — still problem-shaped, never product-shaped.
+# Generic fallbacks — still problem-shaped, never product-shaped. Every line is
+# a plain operational noun phrase: 3-4 words, professional, obvious on sight.
+# Nothing here is a hook, a tease or a conversational aside.
 _GENERIC = [
-    "Quick reality check", "Something operational", "Before we build",
-    "A practical idea", "Worth a look", "One observation",
-    "Time worth saving", "Where time goes", "Something we noticed",
-    "Different angle", "One idea", "Worth ten minutes",
+    "Response time gap", "Enquiry backlog growth", "Manual handling load",
+    "Follow-up delay cost", "Queue wait times", "Handover friction point",
+    "Operational bottleneck note", "Process efficiency gap",
+    "Customer response delay", "Repeat workload pattern",
 ]
 
 # Region-flavoured phrasings, one list per region, indexed by the SAME slot the
@@ -113,29 +119,29 @@ _GENERIC = [
 # the same campaign get different subject lines without losing the intent.
 _REGION_ANGLE: dict[str, list[str]] = {
     "us": ["Reply backlog", "Queue strain", "Slow routing", "Missed calls",
-           "Blind spots"],
+           "Response time gap"],
     "uk": ["Reply backlog", "Queue strain", "Slow routing", "Missed calls",
-           "Blind spots"],
+           "Enquiry handling load"],
     "europe": ["Backlog growing", "Queue strain", "Slow routing", "Missed calls",
-               "Blind spots"],
+               "Process efficiency gap"],
     "gcc": ["Queue backlog", "Wait time", "Slow handover", "Missed calls",
-            "Service gap"],
+            "Service coverage gap"],
     "south_asia": ["Queue backlog", "Wait time", "Slow handover", "Missed calls",
-                   "Service gap"],
+                   "Response time gap"],
     "apac": ["Queue backlog", "Wait time", "Slow handover", "Missed calls",
-             "Service gap"],
+             "Enquiry handling load"],
 }
 
-# Fallbacks for a region we do not have an angle list for. Chosen so the first
-# word is never in BANNED_STARTERS — "Quick check" was unusable because the
-# normaliser has to throw away a banned opener.
+# Fallbacks for a region we do not have an angle list for. Professional and
+# clear, and chosen so the first word is never in BANNED_STARTERS — "Quick
+# check" was unusable because the normaliser has to throw away a banned opener.
 _REGION_SUFFIX = {
-    "us": "Worth a minute",
-    "uk": "Worth a look",
-    "europe": "Practical step",
-    "gcc": "Worth exploring",
-    "south_asia": "Worth a chat",
-    "apac": "Worth a word",
+    "us": "A closer operational look",
+    "uk": "A practical next step",
+    "europe": "A concrete efficiency gain",
+    "gcc": "A clear operational gain",
+    "south_asia": "A practical efficiency step",
+    "apac": "A focused improvement note",
 }
 
 
@@ -230,7 +236,7 @@ def _used_subjects(lead) -> set[str]:
 
 def build_subject(lead, campaign=None, *, followup_number: int = 0,
                   used: set[str] | None = None) -> str:
-    """Return a <= 3-word subject for one outbound email.
+    """Return a <= 4-word subject for one outbound email.
 
     followup_number: 0 = first touch, 1..n = that follow-up. Follow-ups rotate
     to a different, more specific angle than the opening note so the thread

@@ -10,6 +10,8 @@ const WINDOWS = ['1d', '7d', '15d', '30d', 'all']
 
 function money(n) { return '$' + (n ?? 0).toFixed(4) }
 function num(n) { return (n ?? 0).toLocaleString() }
+// pill classes available in styles.css
+const PILL = { ok: 'ok', warn: 'warm', down: 'hot', skipped: 'gray' }
 
 export default function SuperAdmin() {
   const [win, setWin] = useState('30d')
@@ -31,19 +33,23 @@ export default function SuperAdmin() {
   const [monitor, setMonitor] = useState(null)
   const [monPage, setMonPage] = useState(1)
   const [monTab, setMonTab] = useState('outbound') // outbound | inbound | bounced
+  const [health, setHealth] = useState(null)
 
   const loadUsage = () => { api.saUsage({ window: win }).then(setUsage).catch(e => show(e.message, true)) }
   const loadKeys = () => api.saKeys().then(setKeys).catch(() => {})
-  const loadSeries = () => api.saUsageSeries(15).then(setSeries).catch(() => {})
+  // Must be an object: a bare `15` becomes `?15` in qs(), which the server
+  // ignores and silently falls back to its own default.
+  const loadSeries = () => api.saUsageSeries({ days: 15 }).then(setSeries).catch(() => {})
   const loadSecretsHealth = () => api.saSecretsHealth().then(setSecretsHealth).catch(() => {})
   const loadBackups = () => api.saBackups().then(setBackups).catch(() => {})
   const loadAudit = () => api.saAuditLog({ page: auditPage, per_page: 20 }).then(setAudit).catch(e => show(e.message, true))
   const loadMonitor = () => api.monitoring({ page: monPage, per_page: 20 }).then(setMonitor).catch(() => {})
+  const loadHealth = () => api.health().then(setHealth).catch(() => {})
 
   useEffect(() => { loadUsage() }, [win])
-  useEffect(() => { loadSeries(); loadKeys(); loadSecretsHealth(); loadBackups() }, [])
+  useEffect(() => { loadSeries(); loadKeys(); loadSecretsHealth(); loadBackups(); loadHealth() }, [])
   useEffect(() => {
-    const t = setInterval(() => { loadUsage(); loadSeries(); loadMonitor() }, 10000)
+    const t = setInterval(() => { loadUsage(); loadSeries(); loadMonitor(); loadHealth() }, 10000)
     return () => clearInterval(t)
   }, [win])
   useEffect(() => { if (showAudit) loadAudit() }, [showAudit, auditPage])
@@ -95,13 +101,13 @@ export default function SuperAdmin() {
         </div>
         <div className="card stat stat-badge">
           <div className="badge-circle blue"><IconMail /></div>
-          <div className="num"><Counter value={usage?.openai?.input_tokens ?? 0} /></div>
-          <div className="lbl">Input tokens (OpenAI)</div>
+          <div className="num"><Counter value={usage?.all?.input_tokens ?? 0} /></div>
+          <div className="lbl">Input tokens</div>
         </div>
         <div className="card stat stat-badge">
           <div className="badge-circle green"><IconSend /></div>
-          <div className="num"><Counter value={usage?.openai?.output_tokens ?? 0} /></div>
-          <div className="lbl">Output tokens (OpenAI)</div>
+          <div className="num"><Counter value={usage?.all?.output_tokens ?? 0} /></div>
+          <div className="lbl">Output tokens</div>
         </div>
       </div>
 
@@ -125,6 +131,35 @@ export default function SuperAdmin() {
                   <td>{num(m.input_tokens)}</td><td>{num(m.output_tokens)}</td><td>{money(m.cost_usd)}</td></tr>
               ))}
               {(usage?.per_model || []).length === 0 && <tr><td colSpan={5}><div className="empty">No calls yet</div></td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="grid c2 mb">
+        <div className="card">
+          <h3 style={{ fontSize: 15, marginBottom: 10 }}>By provider</h3>
+          <table>
+            <thead><tr><th>Provider</th><th>Calls</th><th>In</th><th>Out</th><th>Cost</th></tr></thead>
+            <tbody>
+              {(usage?.per_provider || []).map(p => (
+                <tr key={p.provider}><td><b>{p.provider}</b></td><td>{num(p.calls)}</td>
+                  <td>{num(p.input_tokens)}</td><td>{num(p.output_tokens)}</td><td>{money(p.cost_usd)}</td></tr>
+              ))}
+              {(usage?.per_provider || []).length === 0 && <tr><td colSpan={5}><div className="empty">No calls yet</div></td></tr>}
+            </tbody>
+          </table>
+        </div>
+        <div className="card">
+          <h3 style={{ fontSize: 15, marginBottom: 10 }}>By call type</h3>
+          <table>
+            <thead><tr><th>Type</th><th>Calls</th><th>In</th><th>Out</th><th>Cost</th></tr></thead>
+            <tbody>
+              {(usage?.per_kind || []).map(k => (
+                <tr key={k.kind}><td><b>{k.kind}</b></td><td>{num(k.calls)}</td>
+                  <td>{num(k.input_tokens)}</td><td>{num(k.output_tokens)}</td><td>{money(k.cost_usd)}</td></tr>
+              ))}
+              {(usage?.per_kind || []).length === 0 && <tr><td colSpan={5}><div className="empty">No calls yet</div></td></tr>}
             </tbody>
           </table>
         </div>
@@ -211,7 +246,24 @@ export default function SuperAdmin() {
       <div className="card mb">
         <div className="row between mb">
           <h3 style={{ fontSize: 15 }}>Live monitoring <span className="live-dot" style={{ marginLeft: 6 }} /></h3>
-          <button className="icon-btn" onClick={loadMonitor} title="Refresh"><IconRefresh /></button>
+          <button className="icon-btn" onClick={() => { loadMonitor(); loadHealth() }} title="Refresh"><IconRefresh /></button>
+        </div>
+
+        {/* System health — this endpoint IS the API 200; the rest are live
+            probes + beat/worker heartbeats (backend services/health.py). */}
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+          <span className={`pill ${health?.ok ? 'ok' : health ? 'hot' : 'gray'}`}
+                title={health ? `Checked ${health.checked_at} · beat every ${health.beat_interval_seconds}s` : 'Checking…'}>
+            {health ? (health.ok ? 'HEALTHY · HTTP 200' : 'DEGRADED') : 'CHECKING…'}
+          </span>
+          {(health?.checks || []).map(c => (
+            <span key={c.key}
+                  className={`pill ${PILL[c.status] || 'gray'}`}
+                  title={c.detail}
+                  style={{ fontSize: 10.5 }}>
+              {c.label} · {c.status === 'ok' ? '200' : c.status.toUpperCase()}
+            </span>
+          ))}
         </div>
 
         {/* Agent status strip */}

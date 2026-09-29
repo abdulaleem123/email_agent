@@ -145,9 +145,9 @@ PARTS: list[dict] = [
     dict(
         key="subject",
         label="Subject (optional)",
-        desc="Optional UI instruction; keep subjects to a maximum of 3 words.",
+        desc="Optional UI instruction; keep subjects to a maximum of 4 words.",
         rule=(
-            "SUBJECT — optional instruction, capped at 3 WORDS MAXIMUM. Short, "
+            "SUBJECT — optional instruction, capped at 4 WORDS MAXIMUM. Short, "
             "specific, peer-to-peer, about an operational reality from the research. "
             "Never an ad, never a question, never a banned opener. The subject is "
             "regenerated in code from a region-aware bank, so spend your words on "

@@ -301,7 +301,7 @@ exclamation marks, emojis, calendar links inside email body, more than one quest
 OUTPUT FORMAT (mandatory)
 ═══════════════════════════════════════════════════════════
 
-Line 1: Subject: [3 words max, peer-to-peer, specific to the company or
+Line 1: Subject: [4 words max, peer-to-peer, specific to the company or
 operational reality from research.
 Good examples: "Reply backlog", "Queue strain", "Missed calls". Banned starts:
 Noticing, Checking, Quick, Hope, Following, Just, Opportunity, Circling.
@@ -448,6 +448,40 @@ def strip_pricing_talk(text: str) -> str:
     out = re.sub(r"\s+\n", "\n", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
+
+
+# A cold email that opens on a category-wide claim instead of this one company
+# reads as a template, whatever else is right about it. Phrases below are the
+# ones that reliably show up when the model had no research to work from.
+_GENERIC_CLAIMS = (
+    "many companies struggle",
+    "many businesses struggle",
+    "many organizations struggle",
+    "many organisations struggle",
+    "struggle with capturing",
+    "if that resonates",
+    "in today's fast-paced world",
+    "in today's competitive",
+    "i hope this email finds you",
+    "i came across your website",
+    "i was looking at your website",
+    "i wanted to reach out",
+    "as a leader in",
+    "companies like yours",
+    "businesses like yours",
+    "organizations like yours",
+    "organisations like yours",
+    "businesses in your industry",
+    "companies in your industry",
+)
+
+
+def has_generic_boilerplate(text: str) -> bool:
+    """True when the draft fell back to category-wide filler.
+
+    Checked on every initial draft — one grounded rewrite if it trips."""
+    low = (text or "").lower()
+    return any(claim in low for claim in _GENERIC_CLAIMS)
 
 
 def booking_link_for(campaign, agent) -> str:
@@ -618,6 +652,11 @@ def _pick_unused_template(db: Session, lead: models.Lead, agent: models.Agent):
     return random.choice(candidates) if candidates else None
 
 
+def _gateway() -> str | None:
+    from . import keys as keysvc
+    return keysvc.gateway_url()
+
+
 def _call_llm(system: str, user_content: str, max_tokens: int = 900,
               db=None, agent_id=None) -> str:
     from . import keys as keysvc
@@ -627,9 +666,9 @@ def _call_llm(system: str, user_content: str, max_tokens: int = 900,
         api_key = keysvc.openai_key(db) if db is not None else settings.OPENAI_API_KEY
         if not api_key:
             raise HTTPException(400, "No OpenAI key set — add it in Super Admin → API Keys")
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, base_url=_gateway())
         try:
-            resp = client.chat.completions.create(
+            resp, spent = keysvc.costed_call(client, ("chat", "completions"),
                 model=settings.OPENAI_MODEL, max_tokens=max_tokens,
                 messages=[{"role": "system", "content": system},
                           {"role": "user", "content": user_content}])
@@ -646,14 +685,17 @@ def _call_llm(system: str, user_content: str, max_tokens: int = 900,
             raise HTTPException(502, f"OpenAI returned an error: {e}")
         if db is not None and resp.usage:
             keysvc.record(db, "openai", "chat", settings.OPENAI_MODEL, agent_id,
-                          resp.usage.prompt_tokens, resp.usage.completion_tokens)
+                          resp.usage.prompt_tokens, resp.usage.completion_tokens,
+                          cost_usd=spent)
         return (resp.choices[0].message.content or "").strip()
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     resp = client.messages.create(
         model=settings.LLM_MODEL, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user_content}])
     if db is not None:
-        keysvc.record(db, "openai", "chat", settings.LLM_MODEL, agent_id,
+        # NOT "openai" — bucketing Claude under OpenAI inflated the OpenAI
+        # tiles and made the Super Admin breakdown lie.
+        keysvc.record(db, "anthropic", "chat", settings.LLM_MODEL, agent_id,
                       resp.usage.input_tokens, resp.usage.output_tokens)
     return "".join(b.text for b in resp.content if b.type == "text").strip()
 
@@ -665,8 +707,16 @@ def _passes_moderation(text: str, db=None) -> bool:
         return True
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        result = client.moderations.create(model="omni-moderation-latest", input=text)
+        client = OpenAI(api_key=api_key, base_url=_gateway())
+        result, spent = keysvc.costed_call(client, ("moderations",), model="omni-moderation-latest", input=text)
+        # Moderation calls used to be invisible — they cost tokens too, so the
+        # call count in Super Admin was always short.
+        if db is not None:
+            usage = getattr(result, "usage", None)
+            keysvc.record(db, "openai", "moderation", "omni-moderation-latest", None,
+                          getattr(usage, "input_tokens", 0) or 0,
+                          getattr(usage, "output_tokens", 0) or 0,
+                          cost_usd=spent)
         return not result.results[0].flagged
     except Exception:
         return True
@@ -733,7 +783,7 @@ def generate_email(db: Session, lead: models.Lead, agent: models.Agent,
     - _humanize() runs on every output as a hard guarantee against AI giveaways.
 
     The subject line this returns is ignored for outbound — subjects.build_subject
-    owns it now, so a 3-word, region-aware, never-repeated subject is a code
+    owns it now, so a 4-word, region-aware, never-repeated subject is a code
     guarantee rather than something the model has to be trusted to do.
     """
     template = None
@@ -755,6 +805,22 @@ def generate_email(db: Session, lead: models.Lead, agent: models.Agent,
 Use DuckDuckGo research then KB. Branch on AI adoption signals:
 - No real AI/automation: anchor on ONE concrete operational pain; position a practical fix.
 - Already has AI: one concrete gap (not a generic upgrade pitch).
+Build a short curiosity gap: enough to prove you understand them, not a full pitch.
+GROUNDING — non-negotiable, this is what separates a researched email from a template:
+- The FIRST sentence must carry one concrete detail pulled from COMPANY RESEARCH, PAIN
+  POINTS or their own website: a product or service they sell, a page of theirs, their
+  market, a recent event, a named area of their operation, or their specific role.
+- The opening sentence is about THIS company. Never about a category. Never write about
+  "many companies", "many businesses", "businesses like yours", "companies in your
+  industry" or "organizations like yours" — those are the exact words of a mass blast.
+- BANNED OPENINGS (rewritten on sight): "I've noticed that many companies struggle",
+  "many companies struggle", "struggle with capturing", "if that resonates", "in today's
+  fast-paced world", "I hope this email finds you", "I came across your website",
+  "as a leader in", "companies like yours", "businesses like yours", "I wanted to reach
+  out", "I was looking at your website".
+- If COMPANY RESEARCH says "none": ground on the company name, their domain, their
+  role/title and country instead. Still one company, never a category.
+- No pitching the product first. Prove you looked, then ask one question.
 Build a short curiosity gap: enough to prove you understand them, not a full pitch.
 Not a sales or marketing blast. Subject must read like a peer noting an operational reality (company or country from research), never like an ad or "Noticing..." opener.
 ONE soft question at most, and only if it is natural: is a short conversation useful?
@@ -860,6 +926,40 @@ TASK — {purpose_rules}"""
     # own website address (any URL, actually) and every avoid phrase.
     subject = playbook.scrub(subject, agent)
     body = playbook.scrub(body, agent)
+
+    # RESEARCH-GROUNDED, NOT TEMPLATE — one rewrite when the draft fell back to
+    # category-wide filler ("many companies struggle..."). The whole point of
+    # the DuckDuckGo pass is that this email is about THIS company, so a draft
+    # that could have been sent to anyone does not go out unchallenged.
+    if purpose == "initial" and has_generic_boilerplate(body):
+        about = (lead.company or lead.website or lead.name or "this company")
+        try:
+            grounded = _call_llm(
+                system,
+                context + (
+                    "\n\nIMPORTANT: the previous draft opened on a category-wide "
+                    'claim about "many companies" instead of this one, so it was '
+                    "rejected. Rewrite it from scratch. The first sentence must "
+                    "name one specific, verifiable detail about "
+                    + about
+                    + " taken from COMPANY RESEARCH, PAIN POINTS or their own "
+                    "website: a product or service they sell, a page of theirs, "
+                    "their market, a recent event, or the exact area of their "
+                    'operation at risk. Never use "many companies", "many '
+                    'businesses", "companies like yours", "businesses like yours" '
+                    'or "if that resonates" anywhere in the email.'),
+                max_tokens=max_tok, db=db, agent_id=agent.id)
+            gs, gb = "Quick note", grounded
+            if grounded.lower().startswith("subject:"):
+                first, _, rest = grounded.partition("\n")
+                gs = first.split(":", 1)[1].strip()[:200]
+                gb = rest.strip()
+            gs, gb = _humanize(gs), _humanize(gb)
+            gs, gb = playbook.scrub(gs, agent), playbook.scrub(gb, agent)
+            if not has_generic_boilerplate(gb):
+                subject, body = gs, gb
+        except Exception:
+            pass
 
     # NO PRICING TALK — one clean rewrite when the model slipped a price in,
     # and a token strip as the last resort. Never sent with pricing in it.

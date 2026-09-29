@@ -118,7 +118,7 @@ class CampaignCreate(BaseModel):
     pricing_policy: str = "escalate"            # escalate | reply
     first_email_length: str = ""                # short | medium | long (overrides agent)
     demo_offer: bool = True                     # offer a live realtime demo
-    subject_max_words: int = Field(default=3, ge=1, le=8)
+    subject_max_words: int = Field(default=4, ge=1, le=8)
     # ── WHAT ARE YOU OFFERING? ───────────────────────────────────────────────
     # Reality-based description of the service (never a sales pitch) + the
     # delivery model in plain text.

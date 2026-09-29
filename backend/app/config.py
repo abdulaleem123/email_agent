@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     # --- LLM ---
     LLM_PROVIDER: str = "openai"
     OPENAI_API_KEY: str = ""
+    # Optional OpenAI-compatible gateway (LiteLLM). When set, every LLM call
+    # goes through it so spend/tokens are accounted in ONE place instead of
+    # our own price table. Empty string = talk to api.openai.com directly.
+    OPENAI_BASE_URL: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"   # cheapest solid model
     OPENAI_MODERATION: bool = True
     ANTHROPIC_API_KEY: str = ""

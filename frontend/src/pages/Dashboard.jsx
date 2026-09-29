@@ -3,7 +3,7 @@ import { api } from '../api.js'
 import Counter from '../Counter.jsx'
 import AnimatedChart from '../AnimatedChart.jsx'
 import MiniOrb from '../MiniOrb.jsx'
-import { IconMail, IconUsers, IconRocket, IconTrash, IconSend, IconInbox, IconTrendUp, IconRefresh } from '../Icons.jsx'
+import { IconMail, IconUsers, IconRocket, IconTrash, IconSend, IconInbox, IconTrendUp, IconRefresh, IconAlert } from '../Icons.jsx'
 
 const WINDOWS = ['1d', '15d', '30d', 'all']
 
@@ -37,6 +37,7 @@ export default function Dashboard() {
   useEffect(() => { const t = setInterval(loadAll, 30000); return () => clearInterval(t) }, [win])
 
   const t = stats?.totals || {}
+  const o = stats?.overall || {}
   const temp = stats?.temperature || {}
   const chartData = series.map(d => ({ ...d, label: d.date }))
 
@@ -74,6 +75,16 @@ export default function Dashboard() {
                   sublabel="in the pipeline" />
         <StatCard icon={IconTrash} tone="red" value={t.garbage} label="In garbage"
                   sublabel="unverified / spam" />
+      </div>
+
+      {/* All-time mail flow — never moves when the window selector changes */}
+      <div className="grid c3 mb stagger">
+        <StatCard icon={IconSend} tone="blue" value={o.sent} label="Outbound — overall"
+                  sublabel="every email this system has ever sent" />
+        <StatCard icon={IconInbox} tone="green" value={o.received} label="Inbound — overall"
+                  sublabel="every email this system has ever received" />
+        <StatCard icon={IconAlert} tone="red" value={o.bounced} label="Bounced — overall"
+                  sublabel="delivery failures, all time" />
       </div>
 
       {/* Chart + Agents */}

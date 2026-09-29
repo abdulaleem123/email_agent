@@ -182,6 +182,12 @@ def enqueue_fifo(db, campaign, agent, leads, *, start_batch_number: int = 1,
             lead.batch_id = batch.id
             if enroll:
                 lead.status = models.LeadStatus.enrolled
+        # COMMIT BEFORE PUBLISH. The worker runs on its own connection, so a
+        # task published before this commit can arrive at a row it cannot see
+        # yet; dispatch_batch then answered "no-batch" and the whole batch was
+        # stranded at `pending` forever with no retry. Make the row visible
+        # first, then tell anyone about it.
+        db.commit()
         # ONE task per batch. It re-reads the batch's leads in id order, so the
         # queue is fully reconstructible from the DB and survives a restart.
         dispatch_batch.apply_async(args=[batch.id], countdown=batch_offset)
@@ -189,7 +195,6 @@ def enqueue_fifo(db, campaign, agent, leads, *, start_batch_number: int = 1,
         batch_numbers.append(number)
         batch_sizes.append(len(chunk))
         batch_offset += len(chunk) * step   # next batch after this window
-        db.commit()
     return {"batches": batches_made, "batch_numbers": batch_numbers,
             "batch_sizes": batch_sizes, "queued": len(leads), "batch_size": size,
             "step_seconds": step,

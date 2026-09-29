@@ -21,8 +21,9 @@ from datetime import datetime, timedelta
 from .celery_app import celery
 from .database import SessionLocal
 from .config import settings
-from . import models
+from . import models, audit
 from .services import spam_filter, scoring, mailer, tavily
+from .services import health as health_service
 from .services import llm as llm_service
 from .services import intent as intent_service, subjects as subject_service
 from .services import playbook, targeting as targeting_service
@@ -261,7 +262,7 @@ def _part_allowed(campaign, key: str) -> bool:
 
 
 def _subject_word_cap(campaign) -> int:
-    """Subject: 3 words max whenever the (optional) Subject part of the
+    """Subject: 4 words max whenever the (optional) Subject part of the
     selection box is on — the default. One definition, shared with the
     subject builder and the preview so they can never disagree."""
     return subject_service.subject_word_cap(campaign)
@@ -346,7 +347,7 @@ def _subject_for_lead(lead, campaign, agent, **kwargs) -> str:
     offending candidate marked as taken until the line is clean.
 
     When the campaign has the Subject part switched on (the default) the
-    campaign's word limit is also hard-capped at 3 words — the UI instruction
+    campaign's word limit is also hard-capped at 4 words — the UI instruction
     is a code guarantee, not a hope."""
     subject = subject_service.build_subject(lead, campaign, **kwargs)
     phrases = playbook.avoid_phrases(agent)
@@ -360,7 +361,7 @@ def _subject_for_lead(lead, campaign, agent, **kwargs) -> str:
         subject = nxt
     subject = playbook.scrub(subject, agent) or subject
     if campaign is not None:
-        # 3 words max whenever the Subject part of the selection box is on;
+        # 4 words max whenever the Subject part of the selection box is on;
         # otherwise the campaign's own configured limit still applies.
         subject = subject_service._normalise(subject,
                                              max(1, _subject_word_cap(campaign)))
@@ -399,6 +400,9 @@ def poll_inbox():
     db = SessionLocal()
     processed = 0
     try:
+        # Written the instant Beat hands us the task: proves the scheduler is
+        # firing even if this cycle goes on to fail. See services/health.py.
+        health_service.heartbeat(db, "beat", "poll_inbox scheduled")
         agents = db.query(models.Agent).all()
         mailboxes = []                    # (agent_or_None, creds)
         for a in agents:
@@ -569,6 +573,9 @@ def poll_inbox():
                         and not lead.not_interested):     # auto-paused → human decides
                     auto_reply.apply_async(args=[lead.id], countdown=_reply_delay(agent, db))
                 processed += 1
+        health_service.heartbeat(db, "worker", "poll cycle finished")
+        health_service.heartbeat(
+            db, "inbox", f"{len(mailboxes)} mailboxes · {processed} messages")
     finally:
         db.close()
     return processed
@@ -612,7 +619,7 @@ def auto_reply(self, lead_id: int):
                     agent_id=agent.id)
             return "excluded-targeting"
         # The subject of a REPLY keeps the thread intact, so it is the incoming
-        # subject (trimmed to the house 3-word rule) rather than a new one.
+        # subject (trimmed to the house 4-word rule) rather than a new one.
         last_in = next((m for m in reversed(lead.messages) if m.direction == "in"), None)
         if last_in is not None:
             intent = intent_service.classify(last_in.body)
@@ -765,13 +772,28 @@ def start_campaign_lead(self, lead_id: int):
             _batch_progress(db, lead, ok=False)
             return "escalated-unverified"
 
-        # DuckDuckGo research (company + person + website + country)
-        if not lead.company_research and (lead.company or lead.website):
+        # DUCKDUCKGO RESEARCH — runs automatically before the first email, so
+        # the draft is written about THIS company instead of "many companies
+        # struggle...". Two things used to let it come back blank: no target
+        # when company/website were empty, and a stale/short blob never being
+        # refreshed. Both are closed here; the research goes straight into the
+        # prompt below and the email goes out from the normal send path.
+        company = (lead.company or "").strip()
+        website = (lead.website or "").strip()
+        if not company or not website:
+            domain = (lead.email or "").split("@")[-1].strip().lower()
+            if domain and "." in domain and not domain.startswith(("example.", "test.")):
+                website = website or ("https://" + domain)
+                if not company:
+                    company = domain.split(".")[0].replace("-", " ").replace("_", " ").title()
+        if (company or website) and len(lead.company_research or "") < 200:
             research, pains = tavily.research_lead(
-                lead.company, lead.name, lead.website, lead.country,
+                company, lead.name, website, lead.country,
                 db=db, lead_email=lead.email)
-            lead.company_research = research
-            lead.pain_points = pains
+            if research:
+                lead.company_research = research
+            if pains:
+                lead.pain_points = pains
             db.commit()
 
         use_tpl = bool(campaign and campaign.template_mode == "template")
@@ -782,7 +804,7 @@ def start_campaign_lead(self, lead_id: int):
             use_template=use_tpl, campaign=campaign,
             first_email_length=(campaign.first_email_length if campaign else ""),
             offer_demo=bool(campaign.demo_offer) if campaign else True)
-        # The subject is generated, not requested: <= 3 words, first letter
+        # The subject is generated, not requested: <= 4 words, first letter
         # capitalised, aimed at this lead's country/region and this campaign's
         # angle, never a line this lead already received, and never a phrase
         # from the agent's Avoid Phrases list.
@@ -854,7 +876,13 @@ def dispatch_batch(self, batch_id: int, cursor: int = 0):
     try:
         batch = db.get(models.Batch, batch_id)
         if not batch:
-            return "no-batch"
+            # Not visible yet — the task can beat the publisher's commit, and
+            # answering "no-batch" here used to strand the batch at `pending`
+            # with nothing left to ever pick it up. Short retry, then give up.
+            try:
+                raise self.retry(countdown=10)
+            except self.MaxRetriesExceededError:
+                return "no-batch"
         if batch.status in (models.BatchStatus.completed,
                             models.BatchStatus.cancelled):
             return f"batch-{batch.status}"
@@ -1111,7 +1139,7 @@ def send_followup(self, lead_id: int):
             strategy=campaign.strategy if campaign else "B2B",
             use_template=False, campaign=campaign,
             use_thread_memory=bool(campaign.followup_memory) if campaign else True)
-        # 3 words, capitalised, never a subject this lead already got, and
+        # 4 words, capitalised, never a subject this lead already got, and
         # never one from the Avoid Phrases list — a repeated or banned subject
         # line is the loudest "automated sequence" signal there is.
         subject = _subject_for_lead(lead, campaign, agent,
@@ -1225,6 +1253,21 @@ def purge_garbage():
             _notify(db, "info", f"Purged {purged} not-interested lead(s)",
                     "Retention window passed — deleted for good.")
         return {"spam_rows": n, "not_interested_leads": purged}
+    finally:
+        db.close()
+
+
+@celery.task(name="app.tasks.purge_audit_logs")
+def purge_audit_logs():
+    """24h retention for the Super Admin audit trail.
+
+    Runs hourly regardless of traffic so an install where nobody touches an
+    admin endpoint still gets trimmed — otherwise the table would only ever
+    shrink when someone opens the Audit logs page or performs an action."""
+    db = SessionLocal()
+    try:
+        dropped = audit.purge_old(db)
+        return {"dropped": dropped, "retention_hours": audit.RETENTION_HOURS}
     finally:
         db.close()
 

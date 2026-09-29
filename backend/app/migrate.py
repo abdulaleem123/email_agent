@@ -94,7 +94,7 @@ ADDITIVE = {
         ("pricing_policy", "VARCHAR(20) DEFAULT 'escalate'"),
         ("first_email_length", "VARCHAR(20) DEFAULT ''"),
         ("demo_offer", "BOOLEAN DEFAULT true"),
-        ("subject_max_words", "INTEGER DEFAULT 3"),
+        ("subject_max_words", "INTEGER DEFAULT 4"),
         # ── what are you offering + delivery model ───────────────────────────
         ("offering", "TEXT DEFAULT ''"),
         ("delivery_model", "TEXT DEFAULT ''"),
@@ -268,7 +268,39 @@ ADDITIVE_INDEXES = {
 }
 
 
+def _batch_cancelled_enum():
+    """Add the missing `cancelled` label to the Postgres `batchstatus` type.
+
+    `BatchStatus.cancelled` was added to the model after the type was first
+    created, and the type is not recreated by create_all on an existing
+    database. Nothing writes the value today, but leaving the Python enum and
+    the column type disagreeing means the first code path that does will fail
+    at runtime instead of at boot.
+
+    Runs on its own AUTOCOMMIT connection, outside run_migrations' transaction,
+    so an unexpected failure can never poison the additive migrations. Silent
+    on purpose: a database that refuses the change still has to boot."""
+    try:
+        if engine.dialect.name != "postgresql":
+            return
+        auto = engine.execution_options(isolation_level="AUTOCOMMIT")
+        with auto.connect() as conn:
+            exists = conn.execute(text(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM pg_enum e "
+                "JOIN pg_type t ON t.oid = e.enumtypid "
+                "WHERE t.typname = 'batchstatus' "
+                "AND e.enumlabel = 'cancelled')")).scalar()
+            if not exists:
+                conn.execute(text(
+                    "ALTER TYPE batchstatus ADD VALUE IF NOT EXISTS "
+                    "'cancelled'"))
+    except Exception:
+        pass
+
+
 def run_migrations():
+    _batch_cancelled_enum()
     _assert_no_duplicate_tables(ADDITIVE)
     insp = inspect(engine)
     with engine.begin() as conn:

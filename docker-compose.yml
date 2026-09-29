@@ -111,6 +111,7 @@ version: "3.9"
 #    5432  → Postgres + pgvector
 #    6379  → Redis
 #    8000  → FastAPI
+#    4000  → LiteLLM gateway (loopback only)
 #    5173  → Frontend
 # ─────────────────────────────────────────────────────────────
 
@@ -146,6 +147,38 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # ── LiteLLM gateway ──────────────────────────────────────────
+  # Single egress point for every LLM call. api/worker reach it at
+  # http://litellm:4000 (OPENAI_BASE_URL in backend/.env) and it hands back
+  # the exact spend for each call in x-litellm-response-cost, so Super Admin
+  # shows real cost even for models our own price table doesn't know.
+  # Published only on loopback — it is an internal gateway, not a public API.
+  litellm:
+    # NOTE: do NOT use the `:main` tag here — it has been frozen on a
+    # Dec-2023 digest forever (and its entrypoint hardcodes LiteLLM's sample
+    # azure config, silently ignoring anything passed in `command`).
+    # `:latest` (2026-09-27, sha256:bd089afdcd35…) has the working
+    # `exec litellm "$@"` entrypoint and supports
+    # configurable_clientside_auth_params, which this proxy relies on.
+    image: ghcr.io/berriai/litellm:latest
+    restart: unless-stopped
+    # No env_file on purpose. The OpenAI key lives in the app's database
+    # (Super Admin -> API Keys), not in .env, and the app hands it over in
+    # each request body (configurable_clientside_auth_params in
+    # litellm/config.yaml). Loading backend/.env here would also hand
+    # LiteLLM our DATABASE_URL and make it try to migrate our schema.
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
 
   # ── FastAPI backend ────────────────────────────────────────
   # api/worker/beat share ONE image on purpose. With only `build: ./backend`

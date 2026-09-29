@@ -1,0 +1,76 @@
+## LiteLLM gateway config — Chatversio Email CRM
+##
+## Why this exists
+##   Every LLM call in api/worker goes through this proxy so that:
+##     * cost comes from LiteLLM's full price map (returned in the
+##       `x-litellm-response-cost` response header) instead of our small
+##       local PRICES table, which silently priced unknown models at $0
+##     * tokens + spend for ALL providers land in one place
+##
+## How the app points here
+##   OPENAI_BASE_URL=http://litellm:4000   (backend/.env)
+##   Blank that line and every call goes straight to api.openai.com again.
+##
+## Why there is no api_key below
+##   The OpenAI key lives in the app's database (set from Super Admin → API
+##   Keys), NOT in .env, so this container cannot read it. Instead the app
+##   passes the real provider key in the request body and this config tells
+##   LiteLLM to accept it:
+##       configurable_clientside_auth_params: ["api_key"]
+##   LiteLLM's Authorization header is used for proxy authentication only
+##   and is never forwarded to OpenAI.
+##
+## Adding a model: copy a block and change both names. `model` is what the
+## real provider call becomes; `model_name` is what our app asks for.
+
+model_list:
+  # ── chat ────────────────────────────────────────────────────────────────
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      configurable_clientside_auth_params: ["api_key"]
+
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      configurable_clientside_auth_params: ["api_key"]
+
+  - model_name: gpt-4.1-mini
+    litellm_params:
+      model: openai/gpt-4.1-mini
+      configurable_clientside_auth_params: ["api_key"]
+
+  - model_name: gpt-4.1
+    litellm_params:
+      model: openai/gpt-4.1
+      configurable_clientside_auth_params: ["api_key"]
+
+  # ── embeddings (per-agent knowledge base) ───────────────────────────────
+  - model_name: text-embedding-3-small
+    litellm_params:
+      model: openai/text-embedding-3-small
+      configurable_clientside_auth_params: ["api_key"]
+
+  - model_name: text-embedding-3-large
+    litellm_params:
+      model: openai/text-embedding-3-large
+      configurable_clientside_auth_params: ["api_key"]
+
+  # ── moderation (every generated email is checked) ───────────────────────
+  - model_name: omni-moderation-latest
+    litellm_params:
+      model: openai/omni-moderation-latest
+      configurable_clientside_auth_params: ["api_key"]
+
+litellm_settings:
+  # one retry on a transient provider error, then surface it to the caller
+  num_retries: 1
+  drop_params: true
+  # must be on for x-litellm-response-cost to come back to the app
+  set_verbose: false
+
+general_settings:
+  track_response_cost: true
+  # No DATABASE_URL and no master_key on purpose: this gateway is internal
+  # only (published on 127.0.0.1:4000) and keeps no state of its own. The
+  # app's own database (api_usage) is the single source of truth for spend.

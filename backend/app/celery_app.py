@@ -22,6 +22,9 @@ celery.conf.beat_schedule = {
     "poll-inbox-every-2-min": {"task": "app.tasks.poll_inbox", "schedule": 120.0},
     "followup-sweep-hourly": {"task": "app.tasks.followup_sweep", "schedule": 3600.0},
     "purge-garbage-daily": {"task": "app.tasks.purge_garbage", "schedule": 86400.0},
+    # Audit trail retention (24h) — hourly so it also trims when no admin
+    # action happens at all. See app/audit.py.
+    "purge-audit-logs-hourly": {"task": "app.tasks.purge_audit_logs", "schedule": 3600.0},
     "purge-escalations-daily": {"task": "app.tasks.purge_escalations", "schedule": 86400.0},
     "stale-leads-sweep-daily": {"task": "app.tasks.stale_leads_sweep", "schedule": 86400.0},
     "daily-db-backup": {"task": "app.tasks.daily_backup", "schedule": 86400.0},

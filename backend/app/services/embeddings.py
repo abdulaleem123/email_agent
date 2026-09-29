@@ -53,12 +53,13 @@ def chunk_text(txt: str) -> list[str]:
 
 def _embed(db: Session, texts: list[str], agent_id=None) -> list[list[float]]:
     from openai import OpenAI
-    client = OpenAI(api_key=keysvc.openai_key(db))
-    resp = client.embeddings.create(model=settings.EMBED_MODEL, input=texts)
+    client = OpenAI(api_key=keysvc.openai_key(db), base_url=keysvc.gateway_url())
+    resp, spent = keysvc.costed_call(client, ("embeddings",), model=settings.EMBED_MODEL, input=texts)
     keysvc.record(db, "openai", "embedding", settings.EMBED_MODEL,
                   agent_id=agent_id,
                   input_tokens=getattr(resp.usage, "prompt_tokens", 0) or
-                               getattr(resp.usage, "total_tokens", 0))
+                               getattr(resp.usage, "total_tokens", 0),
+                  cost_usd=spent)
     return [d.embedding for d in resp.data]
 
 

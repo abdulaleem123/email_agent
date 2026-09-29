@@ -536,3 +536,47 @@ tbody tr{animation:fadeIn .3s ease both}
              background:#eef3ff;color:var(--navy);font-size:12.5px;font-weight:500;white-space:nowrap;
              border:1px solid #dbe6ff}
 .today-pill b{color:var(--blue);font-family:var(--font-d)}
+
+/* ============ animated activity chart (SVG, motion-first) ============ */
+@keyframes acDraw{to{stroke-dashoffset:0}}
+@keyframes acFade{from{opacity:0}to{opacity:1}}
+@keyframes acRise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+@keyframes acDotIn{0%{opacity:0;transform:scale(0)}62%{opacity:1;transform:scale(1.4)}100%{opacity:1;transform:scale(1)}}
+@keyframes acHalo{0%{transform:scale(.55);opacity:.55}72%{transform:scale(2.5);opacity:0}100%{transform:scale(2.5);opacity:0}}
+@keyframes acLegendIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+
+.ac{display:flex;flex-direction:column;min-width:0}
+.ac-legend{display:flex;align-items:center;gap:16px;height:26px;margin-bottom:2px;
+           animation:acLegendIn .45s cubic-bezier(.2,.8,.3,1) .05s both}
+.ac-legend-item{display:inline-flex;align-items:center;gap:7px;color:#5b6780;
+                font-size:12px;font-weight:600;letter-spacing:.1px}
+.ac-legend-dot{width:9px;height:9px;border-radius:50%;display:inline-block;
+               box-shadow:0 0 0 3px rgba(0,0,0,.04);animation:acDotIn .5s cubic-bezier(.2,.9,.3,1.4) .5s both}
+.ac-legend-note{margin-left:auto;color:#9aa4b8;font-size:11.5px;font-weight:500}
+.ac-frame{position:relative;min-width:0}
+.ac-frame svg{display:block;max-width:100%}
+
+.ac-grid{animation:acFade .5s ease .1s both}
+.ac-xlabels{animation:acFade .5s ease .55s both}
+.ac-area{transform-box:fill-box;transform-origin:center bottom;
+         animation:acRise .95s cubic-bezier(.2,.75,.25,1) .32s both}
+.ac-line{stroke-dasharray:1;stroke-dashoffset:1;
+         animation:acDraw 1.2s cubic-bezier(.22,.85,.3,1) .15s forwards}
+.ac-dot{transform-box:fill-box;transform-origin:center;opacity:0;
+        animation:acDotIn .5s cubic-bezier(.2,.9,.3,1.4) both}
+.ac-halo{transform-box:fill-box;transform-origin:center;opacity:0;
+         animation:acHalo 2.6s cubic-bezier(.2,.6,.4,1) 1.05s infinite}
+.ac-cross{transition:transform .16s cubic-bezier(.3,.85,.3,1)}
+
+.ac-tip{position:absolute;pointer-events:none;z-index:3;min-width:118px;
+        background:rgba(255,255,255,.96);backdrop-filter:blur(6px);
+        border:1px solid #e7ebf3;border-radius:10px;padding:8px 10px;
+        box-shadow:0 6px 18px rgba(15,30,60,.13),0 18px 40px rgba(15,30,60,.08);
+        animation:acFade .14s ease both}
+.ac-tip-title{font-size:11px;font-weight:700;color:#001b58;letter-spacing:.2px;
+              margin-bottom:5px;text-transform:uppercase;opacity:.72}
+.ac-tip-row{display:flex;align-items:center;gap:7px;font-size:12px;color:#48566f;
+            padding:2px 0}
+.ac-tip-row i{width:8px;height:8px;border-radius:50%;flex:none}
+.ac-tip-row span{flex:1}
+.ac-tip-row b{color:#0f1b33;font-variant-numeric:tabular-nums}

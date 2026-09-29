@@ -71,7 +71,7 @@ r = intent.classify("can we get a demo tomorrow?")
 check("demo_interest", r.demo_interest, True)
 check("  still replyable", r.replyable, True)
 
-print("\n── subjects: <= 3 words, capitalised, no repeats, region-aware ──")
+print("\n── subjects: <= 4 words, capitalised, no repeats, region-aware ──")
 
 
 class Lead:
@@ -90,7 +90,7 @@ class Msg:
 
 
 class Camp:
-    subject_max_words = 3
+    subject_max_words = 4
     followup_plan = "3,7,14"
     strategy_notes = ""
     pain_focus = "support tickets"
@@ -106,7 +106,7 @@ seen = set()
 for i in range(6):
     s = subjects.build_subject(lead, c, followup_number=i, used=seen)
     words = len(s.split())
-    check(f"followup {i} word count ({s!r})", words <= 3, True)
+    check(f"followup {i} word count ({s!r})", words <= subjects.MAX_WORDS, True)
     check(f"followup {i} capitalised ({s!r})", s[:1].isupper(), True)
     check(f"followup {i} unique ({s!r})", s.lower() not in seen, True)
     seen.add(s.lower())
@@ -119,10 +119,10 @@ print(f"  US : {a!r}")
 print(f"  GCC: {b!r}")
 
 print("\n── normaliser strips junk and never emits banned openers ──")
-for raw, want_max in (("Re: Fwd: Quick question about pricing!!!", 3),
-                      ("Following up on this", 3),
-                      ("Worth a look", 3)):
-    out = subjects._normalise(raw, 3)
+for raw, want_max in (("Re: Fwd: Quick question about pricing!!!", subjects.MAX_WORDS),
+                      ("Following up on this", subjects.MAX_WORDS),
+                      ("Worth a look", subjects.MAX_WORDS)):
+    out = subjects._normalise(raw, subjects.MAX_WORDS)
     print(f"     {raw[:30]!r} -> {out!r}")
     # A banned opener is REJECTED outright (""), never repaired by chopping the
     # first word off — that used to turn "Quick check" into "Check".
@@ -132,19 +132,19 @@ for raw, want_max in (("Re: Fwd: Quick question about pricing!!!", 3),
         check(f"  <= {want_max}w", len(out.split()) <= want_max, True)
         check(f"  capitalised", out[:1].isupper(), True)
 check("banned opener is rejected outright",
-      subjects._normalise("Quick check", 3), "")
+      subjects._normalise("Quick check", subjects.MAX_WORDS), "")
 check("banned opener is rejected outright 2",
-      subjects._normalise("Following up on this", 3), "")
+      subjects._normalise("Following up on this", subjects.MAX_WORDS), "")
 
-print("\n── every banked candidate obeys the 3-word rule ──")
+print("\n── every banked candidate obeys the 4-word rule ──")
 for country in ("United States", "United Kingdom", "Germany", "UAE", "India", "Australia"):
     for company in ("", "Acme Dental", "Northwind Logistics", "Riyadh Clinic",
                     "Berlin Dental Group", "Shopify Store"):
         for cand in subjects.subject_bank_preview(Lead(country=country, company=company), c, 20):
-            if len(cand.split()) > 3:
+            if len(cand.split()) > subjects.MAX_WORDS:
                 fails.append(f"{country}/{company}: {cand!r} is {len(cand.split())} words")
                 print(f"FAIL {country}/{company}: {cand!r}")
-print("ok   all banked candidates are <= 3 words")
+print("ok   all banked candidates are <= 4 words")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILURE(S)"))
 sys.exit(1 if fails else 0)

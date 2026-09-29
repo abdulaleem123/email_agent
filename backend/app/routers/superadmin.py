@@ -34,50 +34,67 @@ def _since(window: str):
 
 @router.get("/usage")
 def usage(window: str = "30d", db: Session = Depends(get_db)):
+    """Aggregated in SQL, not in Python.
+
+    The old version pulled EVERY matching row into memory on each poll
+    (the Super Admin page polls every 10s), which got slower as api_usage
+    grew and eventually made the "live" numbers look stale."""
     since = _since(window)
-    q = db.query(models.ApiUsage)
+    base = db.query(models.ApiUsage)
     if since:
-        q = q.filter(models.ApiUsage.created_at >= since)
+        base = base.filter(models.ApiUsage.created_at >= since)
 
-    rows = q.all()
-    def agg(items):
-        return {
-            "calls": len(items),
-            "input_tokens": sum(r.input_tokens for r in items),
-            "output_tokens": sum(r.output_tokens for r in items),
-            "cost_usd": round(sum(r.cost_usd for r in items), 4),
-        }
+    def _sum(q):
+        calls, tin, tout, cost = q.with_entities(
+            func.count(models.ApiUsage.id),
+            func.coalesce(func.sum(models.ApiUsage.input_tokens), 0),
+            func.coalesce(func.sum(models.ApiUsage.output_tokens), 0),
+            func.coalesce(func.sum(models.ApiUsage.cost_usd), 0.0),
+        ).one()
+        return {"calls": int(calls), "input_tokens": int(tin),
+                "output_tokens": int(tout), "cost_usd": round(float(cost), 4)}
 
-    openai_rows = [r for r in rows if r.provider == "openai"]
+    def _group_by(col, key_name):
+        rows = base.with_entities(
+            col,
+            func.count(models.ApiUsage.id),
+            func.coalesce(func.sum(models.ApiUsage.input_tokens), 0),
+            func.coalesce(func.sum(models.ApiUsage.output_tokens), 0),
+            func.coalesce(func.sum(models.ApiUsage.cost_usd), 0.0),
+        ).group_by(col).all()
+        out = [{key_name: (k if k is not None else ""),
+                "calls": int(c), "input_tokens": int(i),
+                "output_tokens": int(o), "cost_usd": round(float(co), 4)}
+               for k, c, i, o, co in rows]
+        return sorted(out, key=lambda x: x["cost_usd"], reverse=True)
 
-    # per model
-    models_map = {}
-    for r in openai_rows:
-        models_map.setdefault(r.model or "unknown", []).append(r)
-    per_model = [{"model": m, **agg(v)} for m, v in sorted(models_map.items())]
+    # "all" = every provider (OpenAI + Anthropic + search). Bucking Claude
+    # under the OpenAI label used to make the headline tiles lie.
+    everything = _sum(base)
+    openai_only = _sum(base.filter(models.ApiUsage.provider == "openai"))
 
-    # per agent
+    per_model = [{**m, "model": m["model"] or "unknown"}
+                 for m in _group_by(models.ApiUsage.model, "model")]
+    per_kind = [{**m, "kind": m["kind"] or "chat"}
+                for m in _group_by(models.ApiUsage.kind, "kind")]
+    per_provider = [{**m, "provider": m["provider"] or "unknown"}
+                    for m in _group_by(models.ApiUsage.provider, "provider")]
+    per_agent = _group_by(models.ApiUsage.agent_id, "agent_id")
+
     agents = {a.id: a.name for a in db.query(models.Agent).all()}
-    agent_map = {}
-    for r in rows:
-        agent_map.setdefault(r.agent_id, []).append(r)
-    per_agent = [{"agent_id": aid, "name": agents.get(aid, "system" if aid is None else f"#{aid}"),
-                  **agg(v)} for aid, v in agent_map.items()]
-    per_agent.sort(key=lambda x: x["cost_usd"], reverse=True)
-
-    # per kind
-    kind_map = {}
-    for r in rows:
-        kind_map.setdefault(r.kind or "chat", []).append(r)
-    per_kind = [{"kind": k, **agg(v)} for k, v in sorted(kind_map.items())]
+    for a in per_agent:
+        aid = a["agent_id"]
+        a["name"] = agents.get(aid, "system" if aid is None else f"#{aid}")
 
     return {
         "window": window,
-        "openai": {**agg(openai_rows)},
-        "total_cost_usd": round(sum(r.cost_usd for r in rows), 4),
+        "all": everything,
+        "openai": openai_only,
+        "total_cost_usd": everything["cost_usd"],
         "per_model": per_model,
         "per_agent": per_agent,
         "per_kind": per_kind,
+        "per_provider": per_provider,
     }
 
 
@@ -170,22 +187,35 @@ def test_key(name: str, db: Session = Depends(get_db)):
         key = keysvc.openai_key(db)
         if not key:
             return {"ok": False, "detail": "No OpenAI key set"}
-        try:
-            r = httpx.get("https://api.openai.com/v1/models",
-                          headers={"Authorization": f"Bearer {key}"}, timeout=15)
-            if r.status_code == 200:
-                return {"ok": True, "detail": "OpenAI key valid"}
-            return {"ok": False, "detail": f"OpenAI rejected the key ({r.status_code})"}
-        except Exception as e:
-            return {"ok": False, "detail": f"Could not reach OpenAI: {e}"}
+        # Prefer the LiteLLM gateway when one is configured — that's the path
+        # real traffic takes — and fall back to api.openai.com so a key can
+        # still be validated even if the proxy is down.
+        bases = [b for b in (keysvc.gateway_url(), "https://api.openai.com/v1") if b]
+        last = "no endpoint"
+        for base in bases:
+            try:
+                r = httpx.get(f"{base.rstrip('/')}/models",
+                              headers={"Authorization": f"Bearer {key}"}, timeout=15)
+                if r.status_code == 200:
+                    via = " via LiteLLM gateway" if keysvc.gateway_url() and base != "https://api.openai.com/v1" else ""
+                    return {"ok": True, "detail": f"OpenAI key valid{via}"}
+                last = f"{base} rejected the key ({r.status_code})"
+            except Exception as e:
+                last = f"Could not reach {base}: {e}"
+        return {"ok": False, "detail": last}
     return {"ok": False, "detail": "unknown key"}
 
 
 # --------------------------------------------------------------- audit log
 @router.get("/audit-log")
 def audit_log(page: int = 1, per_page: int = 50, db: Session = Depends(get_db)):
-    """Who did what, when — key changes, deletes, login attempts. Paginated."""
+    """Who did what, when — key changes, deletes, login attempts. Paginated.
+
+    Rows older than audit.RETENTION_HOURS are dropped first, so what this
+    endpoint returns (and its `total`, and the count() behind it) can never
+    be a table that has been allowed to grow for months."""
     per_page = min(max(per_page, 1), 200)
+    audit.purge_old(db)
     q = db.query(models.AuditLog).order_by(models.AuditLog.created_at.desc())
     total = q.count()
     items = q.offset((page - 1) * per_page).limit(per_page).all()

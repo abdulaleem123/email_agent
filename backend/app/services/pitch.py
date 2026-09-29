@@ -60,9 +60,9 @@ def _call_pitch_llm(
             "Pitch generation requires GPT-4o-mini."
         )
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, base_url=keysvc.gateway_url())
     try:
-        resp = client.chat.completions.create(
+        resp, spent = keysvc.costed_call(client, ("chat", "completions"),
             model=PITCH_MODEL,
             max_tokens=max_tokens,
             temperature=0.7,
@@ -94,6 +94,7 @@ def _call_pitch_llm(
         keysvc.record(
             db, "openai", "chat", PITCH_MODEL, agent_id,
             resp.usage.prompt_tokens, resp.usage.completion_tokens,
+            cost_usd=spent,
         )
 
     return (resp.choices[0].message.content or "").strip()

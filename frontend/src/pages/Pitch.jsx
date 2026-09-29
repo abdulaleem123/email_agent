@@ -33,9 +33,6 @@ export default function Pitch() {
   const [leadTotal, setLeadTotal] = useState(0)
   const [leadsLoading, setLeadsLoading] = useState(false)
    const [leadSel, setLeadSel] = useState(new Set())
-  const [campaigns, setCampaigns] = useState([])   // "email them through a campaign" — like on Leads
-  const [campaignId, setCampaignId] = useState('')
-  const [emailAgentId, setEmailAgentId] = useState('')
   const [manual, setManual] = useState(null)      // null = closed, else {name,email,phone,website}
   const [manualBusy, setManualBusy] = useState(false)
   const loadRecords = useCallback(() => {
@@ -82,7 +79,6 @@ export default function Pitch() {
 
   useEffect(() => {
     api.agents().then(setAgents).catch(() => {})
-    api.campaigns().then(setCampaigns).catch(() => {})
   }, [])
 
   const [callNotes, setCallNotes] = useState('')
@@ -241,30 +237,6 @@ export default function Pitch() {
 
   const lines = (pitch?.transcript || '').split('\n').filter(l => l.trim())
 
-  const enrollSelectedToCampaign = async () => {
-    if (!leadSel.size) { show('Select leads first', true); return }
-    if (!campaignId) { show('Pick a campaign', true); return }
-    if (!emailAgentId) { show('Pick an agent to send as', true); return }
-    setBusy(true)
-    try {
-      const ids = [...leadSel]
-      const r = await api.enroll(ids, +campaignId, +emailAgentId)
-      const blockedIds = new Set((r.blocked || []).map(b => b.lead_id))
-      const goIds = ids.filter(id => !blockedIds.has(id))
-      let msg = ''
-      if (goIds.length) {
-        const rl = await api.launch(+campaignId, goIds)
-        msg = `Enrolled ${goIds.length} → queued in ${rl.batches?.length || 0} batch(es) of ~${rl.batch_size} (FIFO)`
-      } else {
-        msg = 'Nothing could be emailed (all already contacted)'
-      }
-      if (r.blocked?.length) msg += ` · ${r.blocked.length} blocked/skipped`
-      show(msg)
-      setLeadSel(new Set())
-      loadLeads()
-    } catch (e) { show(e.message, true) } finally { setBusy(false) }
-  }
-
   return (
     <>
       {/* Queued pitch import progress (adopts a running job after a refresh). */}
@@ -411,20 +383,6 @@ export default function Pitch() {
             <input placeholder="Search leads…" value={query} onChange={e => setQuery(e.target.value)} />
           </div>
           <div className="row mb" style={{ gap: 8, padding: '0 10px', alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="sm mut" style={{ marginRight: 4 }}>Send via campaign:</span>
-            <select style={{ width: 180 }} value={campaignId} onChange={e => setCampaignId(e.target.value)} title="Email these leads through which campaign">
-              <option value="">Campaign…</option>
-              {campaigns.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-            <select style={{ width: 150 }} value={emailAgentId} onChange={e => setEmailAgentId(e.target.value)} title="Send as which agent">
-              <option value="">Agent…</option>
-              {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
-            <button className="btn small" disabled={!leadSel.size || !campaignId || !emailAgentId || busy || aiDisabled}
-                    title={aiDisabled ? 'OpenAI API key required' : 'Enroll selected lead(s) into the campaign & queue their emails'}
-                    onClick={enrollSelectedToCampaign}>
-              <IconRocket /> Email {leadSel.size ? `${leadSel.size} ` : ''}selected
-            </button>
             {leadSel.size > 0 && (
               <>
                 <span className="sm mut" style={{ marginLeft: 4 }}>{leadSel.size} selected</span>

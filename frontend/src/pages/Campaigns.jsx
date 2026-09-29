@@ -115,7 +115,7 @@ const BLANK = {
   // First email length, and whether we offer a live realtime demo.
   first_email_length: 'medium',
   demo_offer: true,
-  subject_max_words: 3,
+  subject_max_words: 4,
   // ── WHAT ARE YOU OFFERING? ────────────────────────────────────────────────
   // Reality-based description of the service + how it is delivered, in plain
   // text. Never a pitch — this is what the agent works from.
@@ -452,7 +452,7 @@ export default function Campaigns() {
                   <div className="field"><label>Subject line</label>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                       <input type="number" min={1} max={8} style={{ width: 90 }}
-                        value={form.subject_max_words ?? 3}
+                        value={form.subject_max_words ?? 4}
                         onChange={e => set('subject_max_words', +e.target.value)} />
                       <span className="sm mut">words max — always written by the system, never by the model</span>
                     </div>
@@ -654,7 +654,7 @@ export default function Campaigns() {
                       stays in <b>Messages</b>.
                     </span>
                     <span>
-                      <b style={{ color: 'var(--blue)' }}>Subject</b> → 3 words maximum, written by the
+                      <b style={{ color: 'var(--blue)' }}>Subject</b> → 4 words maximum, written by the
                       system, never by the model.
                     </span>
                     <span>

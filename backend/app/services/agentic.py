@@ -65,7 +65,7 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
         return s, b
 
     from openai import OpenAI
-    client = OpenAI(api_key=key)
+    client = OpenAI(api_key=key, base_url=keysvc.gateway_url())
 
     # Light DuckDuckGo if we have no stored research
     if not (lead.company_research or "").strip() and (lead.company or lead.website or lead.email):
@@ -124,15 +124,17 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
     tools = _tools(agent)
 
     tot_in = tot_out = 0
+    tot_spent = 0.0
     final_text = ""
     for _ in range(4):
-        resp = client.chat.completions.create(
+        resp, spent = keysvc.costed_call(client, ("chat", "completions"),
             model=settings.OPENAI_MODEL,
             max_tokens=450,
             messages=convo,
             tools=tools,
             tool_choice="auto",
         )
+        tot_spent += spent or 0.0
         u = getattr(resp, "usage", None)
         if u:
             tot_in += u.prompt_tokens or 0
@@ -155,7 +157,8 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
         final_text = (msg.content or "").strip()
         break
 
-    keysvc.record(db, "openai", "chat", settings.OPENAI_MODEL, agent.id, tot_in, tot_out)
+    keysvc.record(db, "openai", "chat", settings.OPENAI_MODEL, agent.id,
+                  tot_in, tot_out, cost_usd=tot_spent)
 
     if not final_text:
         from .llm import generate_email

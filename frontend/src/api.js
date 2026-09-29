@@ -99,6 +99,9 @@ export const api = {
   notifications: () => request('/api/dashboard/notifications'),
   markRead: () => request('/api/dashboard/notifications/read', { method: 'POST' }),
   monitoring: (params) => request(`/api/dashboard/monitoring${qs(params)}`),
+  // Background liveness: DB / Redis / Celery Beat / Worker / inbox poll /
+  // LiteLLM gateway, probed server-side (services/health.py).
+  health: () => request('/api/dashboard/health'),
 
   // Agents
   agents: () => request('/api/agents'),

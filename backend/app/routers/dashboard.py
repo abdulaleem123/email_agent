@@ -11,12 +11,15 @@ WINDOWS = {"1d": 1, "15d": 15, "30d": 30, "all": None}
 
 
 def _counts(db, agent_id, since):
+    # `isnot(True)` not `is_(False)`: is_spam is a nullable column, so rows
+    # written before the column existed (or by raw SQL) carry NULL and would
+    # silently vanish from every inbound/outbound total under `IS FALSE`.
     q_out = db.query(func.count(models.EmailMessage.id)).filter(
         models.EmailMessage.direction == "out",
-        models.EmailMessage.is_spam.is_(False))
+        models.EmailMessage.is_spam.isnot(True))
     q_in = db.query(func.count(models.EmailMessage.id)).filter(
         models.EmailMessage.direction == "in",
-        models.EmailMessage.is_spam.is_(False))
+        models.EmailMessage.is_spam.isnot(True))
     if agent_id:
         q_out = q_out.filter(models.EmailMessage.agent_id == agent_id)
         q_in = q_in.filter(models.EmailMessage.agent_id == agent_id)
@@ -24,6 +27,13 @@ def _counts(db, agent_id, since):
         q_out = q_out.filter(models.EmailMessage.created_at >= since)
         q_in = q_in.filter(models.EmailMessage.created_at >= since)
     return q_out.scalar() or 0, q_in.scalar() or 0
+
+
+def _bounce_count(db):
+    return (db.query(func.count(models.EmailMessage.id))
+            .filter(models.EmailMessage.is_spam.is_(True),
+                    models.EmailMessage.spam_reason.ilike("%bounce%"))
+            .scalar() or 0)
 
 
 @router.get("/stats")
@@ -51,13 +61,20 @@ def stats(window: str = Query(default="30d"), db: Session = Depends(get_db)):
 
     hotwarm = dict(db.query(models.Lead.temperature, func.count(models.Lead.id))
                    .group_by(models.Lead.temperature).all())
+    # All-time totals, independent of the selected window — the windowed
+    # cards move around as you switch 1d/15d/30d, these never do.
+    all_sent, all_received = _counts(db, None, None)
     return {
         "window": window,
         "totals": {"sent": total_sent, "received": total_received,
                    "garbage": spam_q.scalar() or 0,
                    "leads": db.query(func.count(models.Lead.id)).filter(
-                       models.Lead.status != models.LeadStatus.garbage).scalar() or 0,
+                        models.Lead.status != models.LeadStatus.garbage).scalar() or 0,
                    "campaigns": db.query(func.count(models.Campaign.id)).scalar() or 0},
+        "overall": {"sent": all_sent, "received": all_received,
+                    "bounced": _bounce_count(db),
+                    "spam": db.query(func.count(models.EmailMessage.id)).filter(
+                        models.EmailMessage.is_spam.is_(True)).scalar() or 0},
         "temperature": {(k.value if hasattr(k, "value") else str(k)): v
                         for k, v in hotwarm.items()},
         "per_agent": per_agent,
@@ -74,7 +91,7 @@ def timeseries(days: int = Query(default=15, ge=1, le=90),
                      models.EmailMessage.direction,
                      func.count(models.EmailMessage.id))
             .filter(models.EmailMessage.created_at >= since,
-                    models.EmailMessage.is_spam.is_(False))
+                    models.EmailMessage.is_spam.isnot(True))
             .group_by(func.date(models.EmailMessage.created_at),
                       models.EmailMessage.direction).all())
     series = {}
@@ -116,6 +133,19 @@ def mark_read(db: Session = Depends(get_db)):
     return {"ok": True}
 
 
+@router.get("/health")
+def health(db: Session = Depends(get_db)):
+    """Liveness for the Super Admin monitoring card.
+
+    Live HTTP 200 on this endpoint is itself the API check; everything else
+    (Postgres, Redis, Beat, Worker, inbox poll, LiteLLM gateway) is probed in
+    services/health.py. Background freshness comes from heartbeats written by
+    the poll_inbox cycle, so a green row means it genuinely ran — not that a
+    config says it should."""
+    from ..services import health as health_service
+    return health_service.probe(db)
+
+
 @router.get("/monitoring")
 def monitoring(page: int = Query(1, ge=1), per_page: int = Query(20, ge=5, le=100),
                db: Session = Depends(get_db)):
@@ -132,17 +162,17 @@ def monitoring(page: int = Query(1, ge=1), per_page: int = Query(20, ge=5, le=10
                       .filter(models.EmailMessage.agent_id == a.id,
                               models.EmailMessage.direction == "out",
                               models.EmailMessage.created_at >= today,
-                              models.EmailMessage.is_spam.is_(False)).scalar() or 0)
+                              models.EmailMessage.is_spam.isnot(True)).scalar() or 0)
         recv_today = (db.query(func.count(models.EmailMessage.id))
                       .filter(models.EmailMessage.agent_id == a.id,
                               models.EmailMessage.direction == "in",
                               models.EmailMessage.created_at >= today,
-                              models.EmailMessage.is_spam.is_(False)).scalar() or 0)
+                              models.EmailMessage.is_spam.isnot(True)).scalar() or 0)
         sent_1h = (db.query(func.count(models.EmailMessage.id))
                    .filter(models.EmailMessage.agent_id == a.id,
                            models.EmailMessage.direction == "out",
                            models.EmailMessage.created_at >= hour_ago,
-                           models.EmailMessage.is_spam.is_(False)).scalar() or 0)
+                           models.EmailMessage.is_spam.isnot(True)).scalar() or 0)
         agent_rows.append({
             "agent_id": a.id, "name": a.name, "role": a.role or "",
             "is_active": a.is_active,
@@ -150,29 +180,31 @@ def monitoring(page: int = Query(1, ge=1), per_page: int = Query(20, ge=5, le=10
             "daily_limit": a.daily_send_limit or 150,
         })
 
-    # Recent outbound (paginated)
-    out_q = (db.query(models.EmailMessage)
-               .filter(models.EmailMessage.direction == "out",
-                       models.EmailMessage.is_spam.is_(False))
-               .order_by(models.EmailMessage.created_at.desc()))
-    out_total = out_q.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
-    out_rows = out_q.offset((page - 1) * per_page).limit(per_page).all()
+    # Recent outbound (paginated). Count FIRST, order AFTER: SQLAlchemy keeps
+    # an existing ORDER BY when with_entities() swaps in the aggregate, and
+    # Postgres then rejects `SELECT count(id) ... ORDER BY created_at`.
+    out_base = db.query(models.EmailMessage).filter(
+        models.EmailMessage.direction == "out",
+        models.EmailMessage.is_spam.isnot(True))
+    out_total = out_base.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
+    out_rows = (out_base.order_by(models.EmailMessage.created_at.desc())
+                .offset((page - 1) * per_page).limit(per_page).all())
 
     # Recent inbound (paginated)
-    in_q = (db.query(models.EmailMessage)
-              .filter(models.EmailMessage.direction == "in",
-                      models.EmailMessage.is_spam.is_(False))
-              .order_by(models.EmailMessage.created_at.desc()))
-    in_total = in_q.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
-    in_rows = in_q.offset((page - 1) * per_page).limit(per_page).all()
+    in_base = db.query(models.EmailMessage).filter(
+        models.EmailMessage.direction == "in",
+        models.EmailMessage.is_spam.isnot(True))
+    in_total = in_base.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
+    in_rows = (in_base.order_by(models.EmailMessage.created_at.desc())
+                .offset((page - 1) * per_page).limit(per_page).all())
 
     # Bounces / failed
-    bounce_q = (db.query(models.EmailMessage)
-                  .filter(models.EmailMessage.is_spam.is_(True),
-                          models.EmailMessage.spam_reason.ilike("%bounce%"))
-                  .order_by(models.EmailMessage.created_at.desc()))
-    bounce_total = bounce_q.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
-    bounce_rows = bounce_q.limit(per_page).all()
+    bounce_base = db.query(models.EmailMessage).filter(
+        models.EmailMessage.is_spam.is_(True),
+        models.EmailMessage.spam_reason.ilike("%bounce%"))
+    bounce_total = bounce_base.with_entities(func.count(models.EmailMessage.id)).scalar() or 0
+    bounce_rows = bounce_base.order_by(models.EmailMessage.created_at.desc()) \
+                             .limit(per_page).all()
 
     lead_ids = {r.lead_id for r in out_rows + in_rows + bounce_rows if r.lead_id}
     leads_map = {l.id: l for l in db.query(models.Lead).filter(models.Lead.id.in_(lead_ids)).all()} if lead_ids else {}
