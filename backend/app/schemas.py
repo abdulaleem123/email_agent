@@ -121,7 +121,7 @@ class CampaignCreate(BaseModel):
     # 3 is the house rule; subjects.subject_word_cap() clamps it at send time.
     # The upper bound stays loose on purpose so an older campaign still holding
     # 4 can be saved again without a validation error.
-    subject_max_words: int = Field(default=3, ge=1, le=8)
+    subject_max_words: int = Field(default=3, ge=1, le=4)
     # ── WHAT ARE YOU OFFERING? ───────────────────────────────────────────────
     # Reality-based description of the service (never a sales pitch) + the
     # delivery model in plain text.

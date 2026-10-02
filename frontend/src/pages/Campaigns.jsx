@@ -451,10 +451,10 @@ export default function Campaigns() {
                   </div>
                   <div className="field"><label>Subject line</label>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <input type="number" min={1} max={3} style={{ width: 90 }}
+                      <input type="number" min={1} max={4} style={{ width: 90 }}
                         value={form.subject_max_words ?? 3}
-                        onChange={e => set('subject_max_words', Math.min(3, Math.max(1, +e.target.value || 3)))} />
-                      <span className="sm mut">words max (3 is the ceiling) — written with the email, then checked in code</span>
+                        onChange={e => set('subject_max_words', Math.min(4, Math.max(1, +e.target.value || 3)))} />
+                      <span className="sm mut">words max (3 is the aim, 4 the ceiling) — written with the email, then checked in code</span>
                     </div>
                   </div>
                   <div className="field"><label>Target country <span className="sm mut">(optional)</span></label>
@@ -654,8 +654,8 @@ export default function Campaigns() {
                       stays in <b>Messages</b>.
                     </span>
                     <span>
-                      <b style={{ color: 'var(--blue)' }}>Subject</b> → exactly 3 words, written to
-                      match the email that is being sent, then checked in code.
+                      <b style={{ color: 'var(--blue)' }}>Subject</b> → 3 words (4 max), Title Case,
+                      written to match the email that is being sent, then checked in code.
                     </span>
                     <span>
                       <b style={{ color: 'var(--blue)' }}>Unsubscribe</b> → untick it to add a plain-text

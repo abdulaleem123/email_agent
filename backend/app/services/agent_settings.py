@@ -145,12 +145,16 @@ PARTS: list[dict] = [
     dict(
         key="subject",
         label="Subject (optional)",
-        desc="Optional UI instruction; keep subjects to exactly 3 words.",
+        desc="Optional UI instruction; keep subjects to 3 words (4 maximum).",
         rule=(
-            "SUBJECT — optional instruction, HARD CAPPED AT 3 WORDS. Sentence case "
-            "(first letter capitalised), short, specific, peer-to-peer, and about "
-            "the operational reality you wrote about in this very email. "
-            "Never an ad, never a question, never a banned opener, never ALL CAPS. "
+            "SUBJECT — optional instruction, 3 WORDS, HARD MAX 4. Title Case "
+            "(every word starts with a capital letter), short, specific, "
+            "peer-to-peer, professional and strong in this industry's own "
+            "words, and about the operational reality you wrote about in this "
+            "very email — grounded in what research showed about their "
+            "company. Never an ad, never a question, never a banned opener, "
+            "never ALL CAPS, never AI/marketing fluff (unlock, boost, "
+            "seamless, revolutionary). "
             "The line is hardened in code and replaced if it does not fit — so "
             "write the 3 words that name this email's topic."
         ),

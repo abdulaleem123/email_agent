@@ -2,15 +2,22 @@
 
 Rules the whole product agreed on, enforced in code rather than in a prompt:
 
-- EXACTLY 3 WORDS, no more. Short enough to read on a phone, long enough to
-  name a topic. Longer than three is where "this reads like an ad" starts.
-- Professional and clear: an operational noun phrase a colleague would file
-  under a real topic ("Response time gap"), never a hook, a tease or a casual
-  aside ("Worth a look", "Something we noticed").
-- Sentence case: first letter uppercase, rest left alone. No ALL CAPS (spam
-  filters read it as shouting), no title-casing soup.
-- No exclamation marks, no "Re:", no banned openers (Noticing / Checking in /
-  Quick question / Following up / Just checking / Opportunity / Hope you're).
+- 3 WORDS is the length we aim for, 4 is the absolute ceiling. Nothing — no
+  campaign, no prompt, no model draft — ever goes past 4 words. Three is where
+  a subject still reads as a topic; four is the last step before "this reads
+  like an ad".
+- Professional and strong, in the language that industry actually uses: an
+  operational noun phrase a colleague would file under a real topic
+  ("Response Time Gap"), grounded in what we know about the lead's company and
+  what the campaign sells — never a hook, a tease or a casual aside
+  ("Worth A Look", "Something We Noticed"), and never AI/marketing fluff
+  (unlock, boost, seamless, revolutionary).
+- Title Case: the first letter of EVERY word uppercase, the rest of the word
+  left alone. No ALL CAPS (spam filters read it as shouting), no run-on
+  sentence case.
+- No exclamation marks, no "Re:", no banned openers (Noticing / I noticed /
+  I see / Checking in / Quick question / Following up / Just checking /
+  Opportunity / Hope you're).
 - ABOUT THE EMAIL THAT IS BEING SENT. The model drafts the subject together
   with the body — `fit_llm_subject` hardens that draft into the house format
   and rejects it when nothing usable is left, in which case the bank below is
@@ -28,32 +35,33 @@ whether it is usable. Nothing raw ever reaches the send path.
 """
 import re
 
-MAX_WORDS = 3
+MAX_WORDS = 3            # what a subject is AIMED at — the normal length
+HARD_MAX_WORDS = 4       # never crossed, by anything, ever
 
 
 def subject_word_cap(campaign) -> int:
     """The word cap actually in force for this campaign.
 
-    3 WORDS MAXIMUM, always — whether the Subject part of the campaign's
-    selection box is ticked (the default, and what the default Agent prompt
-    says) or not, and whatever `subject_max_words` claims. The house rule is
-    the ceiling; a campaign may only ask for FEWER words, never more. No
-    campaign at all: the house rule of 3."""
+    3 words is the aim; 4 is the hard ceiling. A campaign may ask for fewer
+    than the default, and may go up to 4, but nothing pushes past 4 — the
+    house rule is enforced here, not trusted to the prompt. No campaign at
+    all: the default of 3."""
     from . import agent_settings
     if campaign is None:
         return MAX_WORDS
     cap = MAX_WORDS
     if getattr(campaign, "subject_max_words", None):
         try:
-            cap = max(1, min(MAX_WORDS, int(campaign.subject_max_words)))
+            cap = max(1, min(HARD_MAX_WORDS, int(campaign.subject_max_words)))
         except Exception:
             cap = MAX_WORDS
     if agent_settings.is_on(campaign, "subject"):
-        cap = min(cap, MAX_WORDS)
+        cap = min(cap, HARD_MAX_WORDS)
     return cap
 
 BANNED_STARTERS = {
-    "noticing", "checking", "quick", "following", "follow", "just", "hope",
+    "noticing", "noticed", "notice", "see", "saw", "looking", "explored",
+    "researched", "checking", "quick", "following", "follow", "just", "hope",
     "opportunity", "touching", "circling", "reconnecting", "following up",
     "touch base", "fyi", "ps", "update", "question", "regarding", "about",
     "intro", "introduction", "hello", "hi", "hey", "wanted", "wanted to",
@@ -110,7 +118,8 @@ _ANGLES: list[tuple[tuple[str, ...], list[str]]] = [
 ]
 
 # Generic fallbacks — still problem-shaped, never product-shaped. Every line is
-# a plain operational noun phrase: 3 words, professional, obvious on sight.
+# a plain operational noun phrase: 3 words, professional, obvious on sight —
+# never a hook, a tease or a conversational aside, and never AI fluff.
 # Nothing here is a hook, a tease or a conversational aside.
 _GENERIC = [
     "Response time gap", "Enquiry backlog growth", "Manual handling load",
@@ -139,7 +148,7 @@ _REGION_ANGLE: dict[str, list[str]] = {
 }
 
 # Fallbacks for a region we do not have an angle list for. Professional,
-# clear, and short enough to survive the 3-word rule — every line is a plain
+# clear, and short enough to survive the 3-word aim — every line is a plain
 # operational noun phrase whose first word is never in BANNED_STARTERS.
 _REGION_SUFFIX = {
     "us": "Reply backlog trend",
@@ -182,18 +191,50 @@ def _tokens(*values: str) -> str:
 
 
 def _bank_for(lead, campaign) -> list[str]:
-    """Pick the subject bank that matches this campaign's angle for THIS lead."""
+    """Pick the subject bank that matches this campaign's angle for THIS lead.
+
+    The haystack is the campaign (what it sells, who it targets, its pain
+    focus) PLUS what research found about the lead themselves — their
+    industry, their stated pain points and the DuckDuckGo notes. So the
+    fallback bank stays tied to the actual company, not a generic list."""
     hay = _tokens(getattr(lead, "industry", ""), getattr(lead, "title", ""),
                   lead.company, campaign.industry if campaign else "",
                   campaign.strategy_notes if campaign else "",
                   campaign.pain_focus if campaign else "",
                   campaign.target_focus if campaign else "",
                   campaign.what_to_sell if campaign else "",
+                  getattr(campaign, "offering", "") if campaign else "",
+                  getattr(campaign, "ideal_customer", "") if campaign else "",
+                  getattr(lead, "pain_points", ""),
+                  getattr(lead, "company_research", ""),
                   lead.title)
     for keys, bank in _ANGLES:
         if any(k in hay for k in keys):
             return list(bank)
     return list(_GENERIC)
+
+
+# Words that make a subject read like a machine wrote it — marketing verbs and
+# hype adjectives that never show up in a colleague's real subject line. Any
+# candidate containing one is thrown away whole, never repaired into something
+# weaker: "Seamless Support Load" does not become "Support Load", it goes.
+_AI_FLUFF = {
+    "unlock", "unlocks", "unleash", "supercharge", "revolutionize",
+    "revolutionise", "revolutionary", "transform", "transforming", "empower",
+    "elevate", "boost", "boosts", "skyrocket", "seamless", "seamlessly",
+    "synergy", "synergies", "discover", "explore", "maximize", "maximise",
+    "optimize", "optimise", "innovative", "cuttingedge", "turbocharge",
+    "dominate", "effortless", "effortlessly", "gamechanger", "nextlevel",
+    "magic", "leverage", "worldclass", "bestinclass",
+}
+
+
+def _fluff_hit(words: list[str]) -> bool:
+    for w in words:
+        clean = w.strip(".,!?;:'\"()[]-–—").replace("'", "").replace("-", "").lower()
+        if clean in _AI_FLUFF:
+            return True
+    return False
 
 
 def _normalise(raw: str, max_words: int) -> str:
@@ -204,8 +245,10 @@ def _normalise(raw: str, max_words: int) -> str:
     chopping the first word off, which turned "Quick check" into "Check" and
     "Following up on this" into "Up on" — worse than no subject at all.
 
-    Guarantees: <= max_words words, first character uppercase, no "Re:"/"Fwd:",
-    no exclamation or question marks, and never starts on a banned opener."""
+    Guarantees: <= max_words words, Title Case (first letter of every word
+    uppercase, ALL-CAPS words like "AI" left alone), no "Re:"/"Fwd:", no
+    exclamation or question marks, never starts on a banned opener, and never
+    contains AI/marketing fluff."""
     s = re.sub(r"\s+", " ", (raw or "").strip())
     # Strip every leading Re:/Fwd: prefix, not just the first one — a chained
     # "Re: Fwd: Re: Quick question" is common in forwarded threads.
@@ -223,11 +266,13 @@ def _normalise(raw: str, max_words: int) -> str:
     if len(words) > max_words:
         # Keep the first max_words — the head of the phrase carries the meaning.
         words = words[:max_words]
-    out = " ".join(words)
-    if out.split(" ")[0].lower().strip(".,") in BANNED_STARTERS:
+    if words[0].lower().strip(".,") in BANNED_STARTERS:
         return ""          # unusable, not repairable — try the next candidate
-    # First letter uppercase (leave the rest of each word exactly as written).
-    return out[0].upper() + out[1:]
+    if _fluff_hit(words):
+        return ""          # reads like an ad — try the next candidate
+    # Title Case: first letter of every word uppercase, rest left as written.
+    return " ".join(w[:1].upper() + w[1:] if not (w.isupper() and len(w) <= 4)
+                    else w for w in words)
 
 
 
@@ -255,7 +300,9 @@ _WEAK_WORDS = {
 
 
 def _bare(word: str) -> str:
-    return word.strip(".,!?;:'\"()[]-–—").lower()
+    """Lowercased, punctuation-free core of a word. Apostrophes are removed
+    outright so "Northwind's" and "northwind" compare equal."""
+    return word.strip(".,!?;:'\"()[]-–—").replace("'", "").replace("’", "").lower()
 
 
 def _lead_tokens(lead) -> set[str]:
@@ -278,30 +325,50 @@ def _lead_tokens(lead) -> set[str]:
     return out
 
 
-def _trim_to_budget(words: list[str], max_words: int) -> list[str]:
-    """Cut a word list down to `max_words` without chopping mid-phrase.
+def _is_lead_word(word: str, drop: set[str]) -> bool:
+    """True when the word IS the lead (company / person / domain), in any
+    form the model may have written it: "Northwind", "Northwind's",
+    "Logistics"."""
+    if not drop:
+        return False
+    b = _bare(word)
+    if len(b) < 4:
+        return False
+    if b in drop:
+        return True
+    return b.endswith("s") and b[:-1] in drop      # plural / possessive
 
-    Order matters: lose the weak word at the END first (it is almost always a
-    trailing add-on), then any weak word anywhere (a conjunction sitting in the
-    middle), and only then take the head — the head of a phrase carries the
-    meaning. Words already chosen are never repeated, so a line never comes
-    out as "Support load support"."""
-    while len(words) > max_words and words and _bare(words[-1]) in _WEAK_WORDS:
-        words.pop()
-    while len(words) > max_words:
-        idx = next((i for i, w in enumerate(words) if _bare(w) in _WEAK_WORDS),
-                   None)
-        if idx is None:
-            break
-        words.pop(idx)
-    out: list[str] = []
+
+def _fit_words(words: list[str], max_words: int) -> list[str] | None:
+    """Bring a word list inside the budget WITHOUT chopping it mid-phrase.
+
+    Duplicates go first ("Support load support"), then, only if the line is
+    still too long, the words that carry no meaning — articles, prepositions,
+    pronouns ("Customer response delay at Acme Corp" -> "Customer response
+    delay"). Returns None when it still doesn't fit: cutting at word N turns
+    "How your team handles support load" into "How team handles", which reads
+    worse than no subject at all, so the caller takes a clean line from the
+    bank instead."""
+    seen: set[str] = set()
+    deduped: list[str] = []
     for w in words:
-        if any(_bare(w) == _bare(x) for x in out):
+        b = _bare(w)
+        if b in seen:
             continue
+        seen.add(b)
+        deduped.append(w)
+    if len(deduped) <= max_words:
+        return deduped
+    strong = [w for w in deduped if _bare(w) not in _WEAK_WORDS]
+    seen2: set[str] = set()
+    out: list[str] = []
+    for w in strong:
+        b = _bare(w)
+        if b in seen2:
+            continue
+        seen2.add(b)
         out.append(w)
-        if len(out) >= max_words:
-            break
-    return out
+    return out if len(out) <= max_words else None
 
 
 def fit_llm_subject(raw: str, *, max_words: int = MAX_WORDS, lead=None,
@@ -313,17 +380,22 @@ def fit_llm_subject(raw: str, *, max_words: int = MAX_WORDS, lead=None,
     subject being picked from a bank and the body written about something
     else. The model does not get to decide the FORMAT; this does:
 
-    * exactly `max_words` words (the lead's company/person/domain tokens come
-      out first and weak words are dropped, so a long line is trimmed
-      meaningfully instead of chopped mid-phrase),
-    * sentence case — an ALL CAPS line reads as shouting and trips spam
-      filters, so it is lowered before anything else,
-    * no Re:/Fwd:, no punctuation, no banned opener, never a repeat.
+    * at most `max_words` words (3 the aim, 4 the ceiling) — the lead's
+      company/person/domain tokens come out first, then duplicates, then weak
+      words; if the line still runs over, it is rejected rather than chopped
+      mid-phrase,
+    * Title Case — an ALL CAPS line reads as shouting and trips spam filters,
+      so it is lowered before anything else and then capitalised word by word,
+    * no Re:/Fwd:, no punctuation, no banned opener, no AI/marketing fluff,
+      never a repeat.
 
     Returns "" when nothing usable is left; the caller then falls back to the
-    bank. A banned opener ("Quick question about your team") is rejected
-    outright, never repaired — chopping the first word off turned "Quick
-    check" into "Check", which is worse than no subject at all."""
+    bank. Two things send it there on purpose: a banned opener ("Quick
+    question about your team") is rejected outright, never repaired — chopping
+    the first word off turned "Quick check" into "Check", which is worse than
+    no subject at all — and a line that still runs over the word budget after
+    cleaning, because chopping a phrase mid-way ("How team handles") reads
+    worse than a clean line from the bank."""
     s = re.sub(r"\s+", " ", (raw or "").strip())
     if not s:
         return ""
@@ -339,12 +411,13 @@ def fit_llm_subject(raw: str, *, max_words: int = MAX_WORDS, lead=None,
             break
         s = stripped
     drop = _lead_tokens(lead)
-    words = [w for w in s.split(" ")
-             if not (len(_bare(w)) >= 4 and _bare(w) in drop)]
+    words = [w for w in s.split(" ") if not _is_lead_word(w, drop)]
     if not words:
         return ""
-    words = _trim_to_budget(words, max_words)
-    out = _normalise(" ".join(words), max_words)
+    fitted = _fit_words(words, max_words)
+    if fitted is None:
+        return ""
+    out = _normalise(" ".join(fitted), max_words)
     if not out:
         return ""
     if taken and out.lower() in {t.lower() for t in taken}:
@@ -354,7 +427,7 @@ def fit_llm_subject(raw: str, *, max_words: int = MAX_WORDS, lead=None,
 
 def build_subject(lead, campaign=None, *, followup_number: int = 0,
                   used: set[str] | None = None) -> str:
-    """Return a <= 3-word subject for one outbound email.
+    """Return a short subject (3 words the aim, 4 the ceiling) for one email.
 
     followup_number: 0 = first touch, 1..n = that follow-up. Follow-ups rotate
     to a different, more specific angle than the opening note so the thread

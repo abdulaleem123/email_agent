@@ -151,7 +151,7 @@ def subject_preview(cid: int, lead_id: Optional[int] = Query(None),
     A real lead gives the truest answer (their industry, title, country and the
     subjects they already received all feed the pick). With no lead it falls back
     to a bare stand-in so the form can still preview. Used by the campaign screen
-    so nobody is surprised by a 3-word subject in someone's inbox."""
+    so nobody is surprised by a short subject in someone's inbox."""
     from ..services import subjects as subject_service
     c = db.get(models.Campaign, cid)
     if not c:
@@ -162,10 +162,10 @@ def subject_preview(cid: int, lead_id: Optional[int] = Query(None),
                            title="", country=country or (c.target_country or ""))
     elif country:
         lead.country = country
-    # The subject cap actually in force: 3 words max while the Subject part of
-    # the selection box is ticked (the default), otherwise this campaign's own
-    # configured limit — never above the house ceiling of 3. Same helper the
-    # builder and the send path use.
+    # The subject cap actually in force: 3 words the aim (4 the hard ceiling)
+    # while the Subject part of the selection box is ticked (the default),
+    # otherwise this campaign's own configured limit — never above 4. Same
+    # helper the builder and the send path use.
     return {
         "campaign_id": cid,
         "max_words": subject_service.subject_word_cap(c),
