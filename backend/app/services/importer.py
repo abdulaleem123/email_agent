@@ -31,6 +31,7 @@ from ..database import SessionLocal
 from .. import models
 from . import excel_import, jobs, mailer, spam_filter
 from .enroller import enqueue_fifo
+from sqlalchemy.exc import IntegrityError
 
 log = logging.getLogger("chatversio.import")
 
@@ -123,16 +124,66 @@ def _domain_verdicts(domains: set[str]) -> dict:
     return verdicts
 
 
-def _existing_emails(db, emails: list[str], source: str) -> set[str]:
-    """Which of these emails already exist in the queue being imported into.
-    Chunked so a 2000-value IN clause never blows Postgres' parameter limit."""
-    found: set[str] = set()
+def _existing_rows(db, emails: list[str]) -> dict[str, tuple[str, str]]:
+    """email -> (source, status) for addresses that already exist in ANY queue.
+    One pass feeds both the duplicate check and the cross-queue report, so the
+    sheet is only scanned once. Chunked so a 2000-value IN clause never blows
+    Postgres' 65 535-parameter limit."""
+    found: dict[str, tuple[str, str]] = {}
     for part in _chunked(emails, IN_CLAUSE):
-        rows = (db.query(models.Lead.email)
-                .filter(models.Lead.email.in_(part),
-                        models.Lead.source == source).all())
-        found.update(r[0] for r in rows)
+        rows = (db.query(models.Lead.email, models.Lead.source, models.Lead.status)
+                .filter(models.Lead.email.in_(part)).all())
+        for e, s, st in rows:
+            found[e] = (s, st)
     return found
+
+
+def friendly_import_error(exc: Exception) -> str:
+    """Plain language for the progress bar. The raw exception (a DB error, a
+    parser traceback) is logged — it tells the operator nothing about what to
+    DO next, so it never reaches the screen."""
+    if isinstance(exc, excel_import.LeadFileError):
+        return str(exc)
+    text = str(exc).lower()
+    if "duplicate key" in text or "unique constraint" in text:
+        return ("Some of these leads are already in your list — nothing was "
+                "changed. If another upload is still running, wait for it to "
+                "finish, then try again.")
+    if "too many" in text and "parameter" in text:
+        return ("That selection is too large to process in one go — try it in "
+                "smaller batches.")
+    return ("We couldn't import this file. Please open it, re-save it as .xlsx "
+            "or .csv, and upload it again. If it keeps failing, try a smaller "
+            "test file first.")
+
+
+def _restore_deleted(db, emails: list[str], source: str, job) -> int:
+    """Bring back rows that were DELETED (they sit in Trash, which no filter
+    shows, so they look like duplicates) instead of skipping them. Only the
+    Trash state is lifted: flags that stop contact — not_interested,
+    escalated, needs_human, unsubscribed — are deliberately KEPT, so a
+    re-upload can never re-open a conversation somebody closed. Returns how
+    many came back."""
+    if not emails:
+        return 0
+    ids: list[int] = []
+    for part in _chunked(emails, IN_CLAUSE):
+        ids.extend(i for (i,) in (db.query(models.Lead.id)
+                   .filter(models.Lead.email.in_(part),
+                           models.Lead.source == source,
+                           models.Lead.status == models.LeadStatus.garbage)
+                   .all()))
+    if not ids:
+        return 0
+    upd: dict = {"status": models.LeadStatus.new, "garbage_at": None}
+    if job.upload_tag:
+        upd["upload_tag"] = job.upload_tag[:200]
+    restored = 0
+    for part in _chunked(ids, IN_CLAUSE):
+        restored += (db.query(models.Lead)
+                     .filter(models.Lead.id.in_(part))
+                     .update(upd, synchronize_session=False))
+    return restored
 
 
 def run_import(job_id: int) -> None:
@@ -191,17 +242,16 @@ def run_import(job_id: int) -> None:
         jobs.update_job(job_id, phase=f"Verifying {len(domains):,} domains…", pct=12)
         verdicts = _domain_verdicts(domains)
 
-        # ── 4. de-duplicate against the DB (chunked IN) ───────────────────
+        # ── 4. de-duplicate against the DB (one chunked scan, status kept) ──
         jobs.update_job(job_id, phase="Checking for duplicates…", pct=18)
-        have = _existing_emails(db, [r["email"] for r in candidates], source)
-        cross_db = set()
-        if candidates:
-            for part in _chunked([r["email"] for r in candidates], IN_CLAUSE):
-                rows2 = (db.query(models.Lead.email, models.Lead.source)
-                         .filter(models.Lead.email.in_(part)).all())
-                cross_db.update((e, s) for (e, s) in rows2 if s != source)
+        rows_by_email = _existing_rows(db, [r["email"] for r in candidates])
+        # Same queue → real duplicate. The STATUS is what the re-upload rule
+        # turns on further down: a row that still exists is skipped, a row that
+        # was DELETED (it sits in Trash) comes back instead.
+        have = {e: st for e, (s, st) in rows_by_email.items() if s == source}
+        cross_db = {(e, s) for e, (s, st) in rows_by_email.items() if s != source}
 
-        created = skipped = cross = blocked = unverified = 0
+        created = skipped = cross = blocked = unverified = restored_count = 0
         fresh_ids: list[int] = []
         batch_seq = existing_batches
         bundle: list[models.Lead] = []
@@ -210,11 +260,20 @@ def run_import(job_id: int) -> None:
 
         for start in range(0, len(candidates), CHUNK):
             part = candidates[start:start + CHUNK]
-            payload, seen_now = [], set()
+            payload, seen_now, restore = [], set(), []
             for row in part:
                 email = row["email"]
-                if email in have:
-                    skipped += 1                       # same queue → real duplicate
+                prior = have.get(email)
+                if prior is not None:
+                    # RE-UPLOAD RULE: an address that is still in the list is a
+                    # plain duplicate → skip it. An address that was DELETED is
+                    # brought BACK instead — without this, re-uploading a sheet
+                    # you had cleared reported "already exists" and showed
+                    # nothing, because the row only existed in Trash.
+                    if prior == models.LeadStatus.garbage:
+                        restore.append(email)
+                    else:
+                        skipped += 1
                     continue
                 # Worthless address (info@/support@/noreply@/disposable) — never
                 # stored, never contacted. Pure string check, no I/O.
@@ -251,9 +310,28 @@ def run_import(job_id: int) -> None:
                     created_at=now,
                 ))
 
+            # ── insert ────────────────────────────────────────────────────
+            # Two uploads of the same sheet can overlap: the other job wins the
+            # (email, source) unique index and this one would otherwise die
+            # mid-import with a database error. Roll back, keep the rows that
+            # still don't exist, count the rest as duplicates.
+            chunk_emails = [l.email for l in payload]
             if payload:
-                db.add_all(payload)
-                db.flush()                              # assigns .id
+                try:
+                    db.add_all(payload)
+                    db.flush()                          # assigns .id
+                except IntegrityError:
+                    db.rollback()
+                    raced = _existing_rows(db, chunk_emails)
+                    taken = {e for e, (s, st) in raced.items() if s == source}
+                    retry = [l for l in payload if l.email not in taken]
+                    skipped += len(payload) - len(retry)
+                    payload = retry
+                    if payload:
+                        db.add_all(payload)
+                        db.flush()
+
+            if payload:
                 created += len(payload)
                 fresh_ids.extend(l.id for l in payload)
                 if not do_enqueue:
@@ -263,6 +341,11 @@ def run_import(job_id: int) -> None:
                         made_batches.append(
                             _make_batch(db, campaign, batch_seq, bundle[:batch_size]))
                         bundle = bundle[batch_size:]
+            # DELETED ROWS COME BACK. They keep their history, batches and
+            # contact flags — only the Trash state is lifted, so they are
+            # neither re-batched nor auto-enrolled here.
+            if restore:
+                restored_count += _restore_deleted(db, restore, source, job)
             db.commit()
 
             done = min(start + CHUNK, len(candidates))
@@ -271,7 +354,9 @@ def run_import(job_id: int) -> None:
                 job_id, processed=done, created_count=created,
                 skipped_count=skipped, cross_dup_count=cross,
                 blocked_count=blocked, unverified_count=unverified,
-                pct=pct, phase=f"Importing leads {done:,} / {len(candidates):,}…")
+                pct=pct,
+                phase=(f"Importing leads {done:,} / {len(candidates):,}…"
+                       + (f" ({restored_count:,} restored)" if restored_count else "")))
 
             # Honour a cancel between chunks: everything up to here is already
             # committed, so stopping here is clean and re-uploadable.
@@ -314,6 +399,7 @@ def run_import(job_id: int) -> None:
 
         receipt = {
             "created": created, "skipped_duplicates": skipped + dupes_in_file,
+            "restored": restored_count,
             "cross_duplicates": cross, "blocked_addresses": blocked,
             "unverified": unverified, "parsed": total,
             "unique_in_file": len(candidates), "source": source,
@@ -332,13 +418,18 @@ def run_import(job_id: int) -> None:
             # hex, and every finished receipt would otherwise pin that forever.
             payload="",
             phase=(f"Done — {created:,} lead(s) imported"
+                   + (f", {restored_count:,} deleted lead(s) brought back"
+                      if restored_count else "")
                    + (f", {queued:,} queued for sending" if queued else "")),
             result_json=json.dumps(receipt))
     except Exception as e:
         log.exception("import job %s crashed", job_id)
         db.rollback()
+        # The bar shows a sentence the operator can act on; the real exception
+        # is in the log. "Import failed: IntegrityError ..." helps nobody.
         jobs.update_job(job_id, status="error", pct=100, payload="",
-                        phase=f"Import failed: {e}"[:300], error=str(e)[:2000])
+                        phase=friendly_import_error(e)[:300],
+                        error=f"{type(e).__name__}: {e}"[:2000])
     finally:
         db.close()
 

@@ -138,7 +138,11 @@ export default function Leads() {
   }
  
   // BULK ASSIGN: pick ONE agent, apply to every selected lead at once (assign +
-  // enroll + launch) — no more per-row 'Pick agent' one-by-one.
+  // enroll) — no more per-row 'Pick agent' one-by-one.
+  //
+  // enroll ALONE queues the sends (it cuts the batches and schedules them).
+  // Calling api.launch afterwards used to queue the SAME leads a second time,
+  // which is how a lead got two identical cold emails. One enqueue only.
   const enrollSelectedWith = async () => {
     if (!campaignId) { show('Pick a campaign first', true); return }
     if (!bulkAgent) { show('Choose an agent to assign', true); return }
@@ -147,9 +151,9 @@ export default function Leads() {
     const who = agents.find(a => a.id === +bulkAgent)?.name || 'agent'
     setBusy(true)
     try {
-      await api.enroll(ids, +campaignId, +bulkAgent)
-      await api.launch(+campaignId, ids)
-      show(`${ids.length} lead(s) assigned to ${who} & queued`)
+      const r = await api.enroll(ids, +campaignId, +bulkAgent)
+      const queued = r?.enrolled ?? ids.length
+      show(`${queued} lead(s) assigned to ${who} & queued in ${r?.batches?.length || 0} batch(es)`)
       setSel(new Set()); load()
     } catch (ex) { show(ex.message, true) } finally { setBusy(false) }
   }
@@ -186,23 +190,26 @@ export default function Leads() {
   const enrollOneWithAgent = async (lead, chosenAgentId) => {
     if (!chosenAgentId || !campaignId) { show('Pick a campaign in the toolbar above first', true); return }
     try {
+      // ONE call. enroll already queues the first email — a second launch call
+      // re-queued the same lead and the lead was emailed twice.
       const r = await api.enroll([lead.id], +campaignId, +chosenAgentId)
       if (r.blocked?.length) { setBlockedInfo(r.blocked); return }
       if (r.handed_over) {
         show(`${lead.name || lead.email} handed over — the sequence continues as follow-ups (no new cold email)`)
         load(); return
       }
-      const rl = await api.launch(+campaignId, [lead.id])
       show(`${lead.name || lead.email} enrolled with ${agents.find(a => a.id === +chosenAgentId)?.name || 'agent'} — queued`)
       load()
     } catch (ex) { show(ex.message, true) }
   }
- 
+  
   const enrollAndLaunch = async () => {
     if (!sel.size || !campaignId) return
     setBusy(true)
     try {
       const ids = [...sel]
+      // enroll = assign + cut batches + schedule the sends. Nothing else is
+      // needed: a follow-up launch call would queue the leads a second time.
       const r = await api.enroll(ids, +campaignId, agentId ? +agentId : undefined)
       if (r.blocked?.length) {
         setBlockedInfo(r.blocked)
@@ -211,8 +218,7 @@ export default function Leads() {
       const overIds = new Set(r.handed_over_ids || [])
       const goIds = ids.filter(id => !blockedIds.has(id) && !overIds.has(id))
       if (goIds.length) {
-        const rl = await api.launch(+campaignId, goIds)
-        show(`Queued ${rl.queued} emails in ${rl.batches?.length || 0} batch(es) of ~${rl.batch_size}`
+        show(`Queued ${r.enrolled} email(s) in ${r.batches?.length || 0} batch(es) of ~${r.batch_size}`
              + (r.handed_over ? ` · ${r.handed_over} handed over (follow-ups continue)` : ''))
       } else if (r.handed_over) {
         show(`${r.handed_over} lead(s) handed over — sequence continues as follow-ups`)

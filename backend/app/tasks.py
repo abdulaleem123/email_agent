@@ -23,6 +23,7 @@ from .database import SessionLocal
 from .config import settings
 from . import models, audit
 from .services import spam_filter, scoring, mailer, tavily
+from .services import outbound as outbound_guard
 from .services import health as health_service
 from .services import llm as llm_service
 from .services import intent as intent_service, subjects as subject_service
@@ -262,7 +263,7 @@ def _part_allowed(campaign, key: str) -> bool:
 
 
 def _subject_word_cap(campaign) -> int:
-    """Subject: 4 words max whenever the (optional) Subject part of the
+    """Subject: 3 words max whenever the (optional) Subject part of the
     selection box is on — the default. One definition, shared with the
     subject builder and the preview so they can never disagree."""
     return subject_service.subject_word_cap(campaign)
@@ -339,17 +340,34 @@ def _targeting_gate(db, lead, agent, campaign=None) -> str:
         parts=agent_settings.enabled_keys(campaign) if campaign is not None else None)
 
 
-def _subject_for_lead(lead, campaign, agent, **kwargs) -> str:
-    """A subject that survives the Avoid Phrases list.
+def _subject_for_lead(lead, campaign, agent, *, llm_subject: str = "", **kwargs) -> str:
+    """A 3-word subject that is ABOUT the email that is about to go out.
 
-    Subjects come from a code-owned bank, not from the model, so the only way
-    a banned phrase gets in is if it is also in the bank. Rebuild with the
-    offending candidate marked as taken until the line is clean.
+    First choice is the subject the model wrote alongside the body — it was
+    drafted from the same content, so it names the actual topic instead of a
+    generic line. It only gets to pick the WORDS: `subjects.fit_llm_subject`
+    forces the house format on it (3 words, sentence case, no Re:/Fwd:, no
+    banned opener) and drops it when nothing usable is left.
+
+    Fallback — and the normal path when the model gives nothing usable — is the
+    code-owned bank, so the only way a banned phrase gets in is if it is also
+    in the bank. Rebuild with the offending candidate marked as taken until the
+    line is clean.
 
     When the campaign has the Subject part switched on (the default) the
-    campaign's word limit is also hard-capped at 4 words — the UI instruction
-    is a code guarantee, not a hope."""
-    subject = subject_service.build_subject(lead, campaign, **kwargs)
+    word limit is hard-capped at 3 words — the UI instruction is a code
+    guarantee, not a hope."""
+    cap = _subject_word_cap(campaign)
+    taken = {s.lower() for s in (kwargs.get("used")
+                                 or subject_service._used_subjects(lead))}
+    subject = ""
+    if llm_subject:
+        cand = subject_service.fit_llm_subject(llm_subject, max_words=cap,
+                                               lead=lead, taken=taken)
+        if cand:
+            subject = cand
+    if not subject:
+        subject = subject_service.build_subject(lead, campaign, **kwargs)
     phrases = playbook.avoid_phrases(agent)
     for _ in range(5):
         if not playbook.contains_any(subject, phrases):
@@ -361,10 +379,12 @@ def _subject_for_lead(lead, campaign, agent, **kwargs) -> str:
         subject = nxt
     subject = playbook.scrub(subject, agent) or subject
     if campaign is not None:
-        # 4 words max whenever the Subject part of the selection box is on;
+        # 3 words max whenever the Subject part of the selection box is on;
         # otherwise the campaign's own configured limit still applies.
-        subject = subject_service._normalise(subject,
-                                             max(1, _subject_word_cap(campaign)))
+        # _normalise answers "" when the line starts on a banned opener — an
+        # empty subject would be sent as-is, so fall back to the bank instead.
+        subject = (subject_service._normalise(subject, max(1, _subject_word_cap(campaign)))
+                   or subject_service.build_subject(lead, campaign, **kwargs))
     return subject
 
 
@@ -619,7 +639,7 @@ def auto_reply(self, lead_id: int):
                     agent_id=agent.id)
             return "excluded-targeting"
         # The subject of a REPLY keeps the thread intact, so it is the incoming
-        # subject (trimmed to the house 4-word rule) rather than a new one.
+        # subject (trimmed to the house 3-word rule) rather than a new one.
         last_in = next((m for m in reversed(lead.messages) if m.direction == "in"), None)
         if last_in is not None:
             intent = intent_service.classify(last_in.body)
@@ -722,6 +742,15 @@ def start_campaign_lead(self, lead_id: int):
         if not agent or not agent.is_active or (campaign and campaign.status != "active"):
             return "paused"
 
+        # ONE INITIAL EMAIL PER LEAD — always. A lead can end up queued twice
+        # (two enroll clicks, a re-enroll while the first send is still being
+        # written, two batches over the same selection). The message table is
+        # the source of truth: if a real outbound already exists for this lead,
+        # this task is a duplicate and must not send again. Follow-ups are a
+        # separate path (send_followup) and are not affected by this.
+        if outbound_guard.already_contacted(db, lead):
+            return "duplicate-initial-skipped"
+
         # NEVER contact worthless addresses (noreply@/info@/support@, Zoho/
         # Hostinger notification aliases, disposable mailboxes). Stopped
         # before anything is generated or sent → Escalation for a human.
@@ -804,15 +833,29 @@ def start_campaign_lead(self, lead_id: int):
             use_template=use_tpl, campaign=campaign,
             first_email_length=(campaign.first_email_length if campaign else ""),
             offer_demo=bool(campaign.demo_offer) if campaign else True)
-        # The subject is generated, not requested: <= 4 words, first letter
+        # The subject is written FROM this email (the model drafts it with the
+        # body), then hard-fitted to the house rule: 3 words, first letter
         # capitalised, aimed at this lead's country/region and this campaign's
         # angle, never a line this lead already received, and never a phrase
-        # from the agent's Avoid Phrases list.
-        subject = _subject_for_lead(lead, campaign, agent)
+        # from the agent's Avoid Phrases list. Anything unusable falls back to
+        # the code-owned bank, so a bad model subject can never go out.
+        subject = _subject_for_lead(lead, campaign, agent, llm_subject=subject)
         if not lead.unsub_token:
             import secrets as _secrets
             lead.unsub_token = _secrets.token_urlsafe(24)
             db.commit()
+        # CLAIM THE SEND. Two tasks can be racing on this lead (double queue,
+        # double click, two batches over the same selection): take a row lock
+        # and RE-CHECK the message table inside it. The loser blocks here for
+        # the few seconds the winner needs to hand the mail to SMTP, then sees
+        # the winner's email and backs off — the lead is never emailed twice.
+        # The lock is released by the commit at the end of this task.
+        db.commit()                                   # nothing pending — start clean
+        db.query(models.Lead).filter(models.Lead.id == lead_id)\
+          .with_for_update().first()
+        if outbound_guard.already_contacted(db, lead):
+            db.rollback()
+            return "duplicate-initial-skipped"
         try:
             msg_id = mailer.send_email(lead.email, subject, body,
                                        use_html_template=use_tpl,
@@ -1139,11 +1182,12 @@ def send_followup(self, lead_id: int):
             strategy=campaign.strategy if campaign else "B2B",
             use_template=False, campaign=campaign,
             use_thread_memory=bool(campaign.followup_memory) if campaign else True)
-        # 4 words, capitalised, never a subject this lead already got, and
-        # never one from the Avoid Phrases list — a repeated or banned subject
-        # line is the loudest "automated sequence" signal there is.
+        # 3 words, capitalised, about THIS email, never a subject this lead
+        # already got, and never one from the Avoid Phrases list — a repeated
+        # or banned subject line is the loudest "automated sequence" signal.
         subject = _subject_for_lead(lead, campaign, agent,
-                                    followup_number=lead.followups_sent)
+                                    followup_number=lead.followups_sent,
+                                    llm_subject=subject)
         last_out = next((m for m in reversed(lead.messages) if m.direction == "out"), None)
         if not lead.unsub_token:
             import secrets as _secrets

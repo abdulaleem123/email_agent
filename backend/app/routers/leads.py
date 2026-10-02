@@ -11,7 +11,7 @@ Capacity notes — this router is the one that met an 80k-row sheet:
 """
 import re
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -347,12 +347,13 @@ def _make_batch(db, campaign, number: int, leads: list) -> dict:
 
 
 @router.post("/upload", status_code=202)
-async def upload_leads(file: UploadFile = File(...),
-                       source: str = Query(default="excel"),
-                       batch_size: int | None = Query(default=None, ge=10, le=2000),
-                       auto_enroll: bool = Query(default=True),
-                       campaign_id: int | None = Query(default=None),
-                       agent_id: int | None = Query(default=None),
+async def upload_leads(request: Request,
+                       file: UploadFile = File(...),
+                       source: str | None = Form(default=None),
+                       batch_size: int | None = Form(default=None),
+                       auto_enroll: bool | None = Form(default=None),
+                       campaign_id: int | None = Form(default=None),
+                       agent_id: int | None = Form(default=None),
                        db: Session = Depends(get_db)):
     """Import an Excel/CSV sheet — QUEUED, returns immediately with a job id.
 
@@ -361,6 +362,12 @@ async def upload_leads(file: UploadFile = File(...),
     de-dupe against the DB, per-domain MX, chunked inserts, batching, enroll)
     happens in a background thread, so an 80k-row sheet no longer means a
     request that times out and returns 500 with half the file imported.
+
+    campaign_id / agent_id are FORM fields (the page posts a FormData body).
+    They used to be declared as query params, so they were silently dropped
+    and auto-enroll never received them — every field therefore also falls
+    back to the query string, which is where source/batch_size/auto_enroll
+    are sent.
 
     source=excel → Leads (outreach) only.
     source=pitch → Pitch Decker only (never auto-emailed).
@@ -373,13 +380,39 @@ async def upload_leads(file: UploadFile = File(...),
 
     auto_enroll + campaign (+ agent) → imported leads are enrolled and queued on
     the same strict FIFO the manual launch uses."""
-    if not file.filename or not file.filename.lower().endswith(ALLOWED_EXT):
-        raise HTTPException(400, "Only .xlsx, .xls or .csv files are allowed")
-    src = (source or "excel").strip().lower()
+    qp = request.query_params
+
+    def _both(key: str, cast, form_val):
+        """Form field first, query string second — callers use either one."""
+        if form_val is not None:
+            return form_val
+        raw = qp.get(key)
+        if raw in (None, ""):
+            return None
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return None
+
+    src = str(_both("source", str, source) or "excel").strip().lower()
     if src == "csv":
         src = "excel"
     if src not in ("excel", "pitch", "manual"):
         src = "excel"
+    batch_size = _both("batch_size", int, batch_size)
+    if batch_size is not None:
+        batch_size = max(10, min(2000, batch_size))
+    if auto_enroll is None:
+        auto_enroll = _both("auto_enroll",
+                            lambda v: str(v).lower() in ("1", "true", "yes", "on"),
+                            auto_enroll)
+    if auto_enroll is None:
+        auto_enroll = True
+    campaign_id = _both("campaign_id", int, campaign_id)
+    agent_id = _both("agent_id", int, agent_id)
+
+    if not file.filename or not file.filename.lower().endswith(ALLOWED_EXT):
+        raise HTTPException(400, "Only .xlsx, .xls or .csv files are allowed")
 
     raw = await file.read()
     if not raw:
@@ -616,21 +649,27 @@ def enroll(data: EnrollRequest, db: Session = Depends(get_db)):
     explicit_ids = bool(data.lead_ids)
     own_days = ownership_service.ownership_days(db)
     # ── who already got a real outbound (ever) ─────────────────────────────
-    prior_out = {lid for (lid,) in (
-        db.query(models.EmailMessage.lead_id)
-        .filter(models.EmailMessage.lead_id.in_(ids),
-                models.EmailMessage.direction == "out",
-                models.EmailMessage.is_spam.is_(False))
-        .distinct().all())}
+    # Chunked: these two queries used to take the whole id list at once, and
+    # Postgres caps a statement at 65 535 bind parameters — "enroll all
+    # matching" on a few thousand leads blew past it and surfaced as a 500.
+    prior_out: set[int] = set()
+    for part in _chunks(ids):
+        prior_out.update(lid for (lid,) in (
+            db.query(models.EmailMessage.lead_id)
+            .filter(models.EmailMessage.lead_id.in_(part),
+                    models.EmailMessage.direction == "out",
+                    models.EmailMessage.is_spam.is_(False))
+            .distinct().all()))
     # ── who did an agent email TODAY (the 24h lock) ────────────────────────
-    sent_today = {}
-    for lid, aid in (db.query(models.EmailMessage.lead_id, models.EmailMessage.agent_id)
-                     .filter(models.EmailMessage.lead_id.in_(ids),
-                             models.EmailMessage.direction == "out",
-                             models.EmailMessage.agent_id.isnot(None),
-                             models.EmailMessage.created_at >= today_start)
-                     .all()):
-        sent_today.setdefault(lid, set()).add(aid)
+    sent_today: dict[int, set] = {}
+    for part in _chunks(ids):
+        for lid, aid in (db.query(models.EmailMessage.lead_id, models.EmailMessage.agent_id)
+                         .filter(models.EmailMessage.lead_id.in_(part),
+                                 models.EmailMessage.direction == "out",
+                                 models.EmailMessage.agent_id.isnot(None),
+                                 models.EmailMessage.created_at >= today_start)
+                         .all()):
+            sent_today.setdefault(lid, set()).add(aid)
 
     # ── narrow to leads that are still enrollable, in chunks ───────────────
     wanted: set[int] = set()

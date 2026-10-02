@@ -184,9 +184,9 @@ EMAIL STRUCTURE (initial):
 
 SUBJECT LINE RULES:
 - Never start with Noticing, Checking in, Quick question, Following up, Hope this finds you, Just, Opportunity.
-- Write like a founder noting a real operational point: e.g. "When traffic outruns replies",
-  "Lead handling as you scale", "Ops strain after recent growth", "Response time as [Company] scales".
-- 4–8 words. Specific. Calm. No hype. No exclamation marks. Not an ad.
+- EXACTLY 3 words, sentence case, about the point you actually made in the body:
+  e.g. "Response time gap", "Lead handling", "Ops strain", "Reply backlog".
+- Calm. No hype. No exclamation marks. Not an ad. Never the company's own name.
 
 STRICT BANS: no "no pressure", no "offer/pitch/unlock/revolutionize", no tool names, no agency framing, one question max, 90–130 words.""",
 
@@ -301,12 +301,17 @@ exclamation marks, emojis, calendar links inside email body, more than one quest
 OUTPUT FORMAT (mandatory)
 ═══════════════════════════════════════════════════════════
 
-Line 1: Subject: [4 words max, peer-to-peer, specific to the company or
-operational reality from research.
-Good examples: "Reply backlog", "Queue strain", "Missed calls". Banned starts:
-Noticing, Checking, Quick, Hope, Following, Just, Opportunity, Circling.
-NOTE: the subject is regenerated in code from a region-aware bank, so whatever
-you write here is discarded. Spend your words on the body instead.]
+Line 1: Subject: [EXACTLY 3 WORDS, sentence case (first letter capitalised,
+everything else lower case), peer-to-peer. It must be ABOUT THE EMAIL BELOW —
+take the operational reality you actually wrote about, never a pitch and never
+a hook. Name the topic, not the product.
+Good examples: "Reply backlog", "Queue strain", "Response time gap".
+Banned starts: Noticing, Checking, Quick, Hope, Following, Just, Opportunity,
+Circling. Banned: hype/sales words, ALL CAPS, exclamation marks, "Re:", the
+company's own name.
+NOTE: this line is hardened in code — 3 words, sentence case, never a repeat,
+never a banned opener — and a line that does not fit is thrown away and
+replaced. So write the 3 words that genuinely fit this body.]
 Blank line.
 Email body — Hi [FirstName], ... Regards, [Name]
 Nothing else. No commentary. No alternatives. No preamble.
@@ -782,8 +787,11 @@ def generate_email(db: Session, lead: models.Lead, agent: models.Agent,
     - use_thread_memory: follow-ups read the actual thread and build on it.
     - _humanize() runs on every output as a hard guarantee against AI giveaways.
 
-    The subject line this returns is ignored for outbound — subjects.build_subject
-    owns it now, so a 4-word, region-aware, never-repeated subject is a code
+    The subject line this returns IS used for outbound, but only as a
+    proposal: subjects.fit_llm_subject hardens it into the house format
+    (exactly 3 words, sentence case, no banned opener, never a repeat) and
+    throws it away when nothing usable is left — subjects.build_subject's bank
+    is the fallback. So the line is about this email, and the format is a code
     guarantee rather than something the model has to be trusted to do.
     """
     template = None

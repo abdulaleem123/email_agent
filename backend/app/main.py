@@ -41,16 +41,46 @@ app = FastAPI(title=settings.APP_NAME, docs_url="/docs" if settings.DEBUG else N
 async def _validation_handler(request: Request, exc: RequestValidationError):
     first = (exc.errors() or [{}])[0]
     where = ".".join(str(p) for p in (first.get("loc") or [])[1:]) or "request"
+    # Pydantic's own wording ("Input should be a valid integer") is developer
+    # language; the browser shows this line to the person clicking Upload.
+    msg = first.get("msg", "invalid")
+    msg = _VALIDATION_TEXT.get(msg, msg)
     return JSONResponse(status_code=422,
-                        content={"detail": f"{where}: {first.get('msg', 'invalid')}",
+                        content={"detail": f"{where}: {msg}",
                                  "errors": [str(e.get("msg", "")) for e in (exc.errors() or [])[:5]]})
+
+
+_VALIDATION_TEXT = {
+    "Input should be a valid integer": "must be a whole number",
+    "Input should be a valid number": "must be a number",
+    "Input should be a valid string": "must be text",
+    "Input should be a valid boolean": "must be yes or no",
+    "Field required": "is missing",
+}
+
+
+def _friendly_500(exc: Exception) -> str:
+    """One sentence telling the operator what to DO. The class name, the
+    message and the full traceback stay in the log — none of them help the
+    person whose upload or enroll just failed."""
+    text = str(exc).lower()
+    if "too many" in text and "parameter" in text:
+        return "That selection was too large for one request — try it in smaller batches."
+    if "duplicate key" in text or "unique constraint" in text:
+        return "Some of those records already exist — nothing was changed."
+    if "could not connect" in text or "connection refused" in text or \
+            "connection to server" in text or "timeout" in text or "timed out" in text:
+        return "The server is busy or unreachable right now — please try again in a moment."
+    if isinstance(exc, MemoryError):
+        return "That was too much data to process at once — try a smaller file or selection."
+    return ("Something went wrong on our side — please try again. If it keeps "
+            "failing, the details are in the server log.")
 
 
 @app.exception_handler(Exception)
 async def _unhandled_handler(request: Request, exc: Exception):
     log.exception("unhandled error on %s %s", request.method, request.url.path)
-    return JSONResponse(status_code=500,
-                        content={"detail": f"Server error: {type(exc).__name__}: {exc}"[:400]})
+    return JSONResponse(status_code=500, content={"detail": _friendly_500(exc)})
 
 # Allow the configured origin + common local dev origins
 # (localhost, 127.0.0.1, and WSL2/LAN IPs like 172.x.x.x / 192.168.x.x)

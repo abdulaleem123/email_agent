@@ -7,7 +7,9 @@ of excel' still imports correctly."""
 import io
 import re
 import csv
+import zipfile
 import openpyxl
+from openpyxl.utils.exceptions import InvalidFileException
 
 ALIASES = {
     "name": {"name", "full name", "fullname", "client", "client name", "contact",
@@ -28,6 +30,38 @@ ALIASES = {
 EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 URL_RE = re.compile(r"^(https?://|www\.)|(\.[a-z]{2,}(/|$))", re.I)
 
+_FILE_ADVICE = "Please open the file, save it as .xlsx or .csv, and upload it again."
+
+
+class LeadFileError(Exception):
+    """A file the importer could not read — the message is FOR THE OPERATOR.
+
+    Raised with a plain sentence telling them what to do next. The importer
+    shows it verbatim on the progress bar; a traceback or an openpyxl error
+    name means nothing to the person clicking Upload."""
+
+
+def _read_error(filename: str, exc: Exception) -> LeadFileError:
+    """Map whatever the parser choked on onto one sentence they can act on."""
+    name = (filename or "").lower()
+    if name.endswith(".xls"):
+        return LeadFileError(
+            f"'{filename}' is an older .xls workbook, which this importer cannot "
+            f"read. {_FILE_ADVICE}")
+    if isinstance(exc, StopIteration):            # openpyxl: no sheets at all
+        return LeadFileError(f"'{filename or 'that file'}' has no data in it. {_FILE_ADVICE}")
+    if isinstance(exc, (ValueError, KeyError, PermissionError,
+                        zipfile.BadZipFile, InvalidFileException)):
+        # InvalidFileException is what openpyxl raises for a non-ZIP payload
+        # (html/rtf/pdf/corrupt) or a password-protected workbook; ValueError
+        # covers the same class of problem for other readers.
+        return LeadFileError(
+            f"'{filename}' does not look like a readable Excel file — it may be "
+            f"corrupt, password-protected, or saved as something else. {_FILE_ADVICE}")
+    if isinstance(exc, (csv.Error, UnicodeError)):
+        return LeadFileError(f"We couldn't read '{filename}' as CSV. {_FILE_ADVICE}")
+    return LeadFileError(f"We couldn't read '{filename}'. {_FILE_ADVICE}")
+
 
 def _map_headers(headers: list[str]) -> dict[int, str]:
     mapping = {}
@@ -39,11 +73,20 @@ def _map_headers(headers: list[str]) -> dict[int, str]:
     return mapping
 
 
-def _rows_from_xlsx(raw: bytes):
-    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-    ws = wb.active
-    for row in ws.iter_rows(values_only=True):
-        yield ["" if c is None else str(c).strip() for c in row]
+def _rows_from_xlsx(raw: bytes, filename: str = ""):
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        ws = wb.active
+        if ws is None:
+            raise LeadFileError(f"'{filename or 'that file'}' has no data in it. {_FILE_ADVICE}")
+        for row in ws.iter_rows(values_only=True):
+            yield ["" if c is None else str(c).strip() for c in row]
+    except LeadFileError:
+        raise
+    except Exception as exc:
+        # The generator body only runs once `list()` pulls on it, so this is
+        # exactly where a bad workbook surfaces.
+        raise _read_error(filename, exc) from exc
 
 
 def _rows_from_csv(raw: bytes):
@@ -103,8 +146,15 @@ def _detect_by_pattern(cells: list[str]) -> dict:
 
 
 def parse_leads(filename: str, raw: bytes) -> list[dict]:
-    rows = list(_rows_from_csv(raw) if filename.lower().endswith(".csv")
-                else _rows_from_xlsx(raw))
+    """Parse a sheet into lead dicts. Any unreadable file raises LeadFileError
+    with a message meant for the operator, never an exception name."""
+    try:
+        rows = list(_rows_from_csv(raw) if filename.lower().endswith(".csv")
+                    else _rows_from_xlsx(raw, filename))
+    except LeadFileError:
+        raise
+    except Exception as exc:
+        raise _read_error(filename, exc) from exc
     if not rows:
         return []
 

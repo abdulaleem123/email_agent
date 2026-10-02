@@ -145,13 +145,14 @@ PARTS: list[dict] = [
     dict(
         key="subject",
         label="Subject (optional)",
-        desc="Optional UI instruction; keep subjects to a maximum of 4 words.",
+        desc="Optional UI instruction; keep subjects to exactly 3 words.",
         rule=(
-            "SUBJECT — optional instruction, capped at 4 WORDS MAXIMUM. Short, "
-            "specific, peer-to-peer, about an operational reality from the research. "
-            "Never an ad, never a question, never a banned opener. The subject is "
-            "regenerated in code from a region-aware bank, so spend your words on "
-            "the body instead."
+            "SUBJECT — optional instruction, HARD CAPPED AT 3 WORDS. Sentence case "
+            "(first letter capitalised), short, specific, peer-to-peer, and about "
+            "the operational reality you wrote about in this very email. "
+            "Never an ad, never a question, never a banned opener, never ALL CAPS. "
+            "The line is hardened in code and replaced if it does not fit — so "
+            "write the 3 words that name this email's topic."
         ),
     ),
     dict(

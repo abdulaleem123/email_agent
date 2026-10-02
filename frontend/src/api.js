@@ -5,8 +5,13 @@ export function getToken() {
 }
 
 export function setToken(token) {
-  if (token) localStorage.setItem(TOKEN_KEY, token)
-  else localStorage.removeItem(TOKEN_KEY)
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token)
+    lastRefreshAt = Date.now()   // a brand-new token needs no refresh for a while
+  } else {
+    localStorage.removeItem(TOKEN_KEY)
+    lastRefreshAt = 0
+  }
 }
 
 export function logout() {
@@ -14,7 +19,44 @@ export function logout() {
   window.dispatchEvent(new Event('cv-logout'))
 }
 
+// ── Session lifetime ────────────────────────────────────────────────────────
+// The token dies after an hour of inactivity (SESSION_IDLE_MINUTES on the
+// server) and never outlives 12h from the moment of login. While the user is
+// working we slide the idle clock forward with POST /api/auth/refresh, at
+// most once every 10 minutes so a busy page can't turn into a refresh storm.
+// If that refresh is ever missed, the next real request comes back 401 and
+// the handler below drops the user on the login screen.
+const REFRESH_AFTER = 10 * 60 * 1000
+let lastRefreshAt = 0
+
+async function refreshSession() {
+  const headers = {}
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch('/api/auth/refresh', { method: 'POST', headers })
+  if (res.status === 401) {
+    logout()          // idle/absolute deadline passed — this session is over
+    return
+  }
+  if (!res.ok) return
+  const data = await res.json().catch(() => null)
+  // Only adopt the new token if the session this refresh was started for is
+  // still the one in storage — otherwise a sign-out (or a newer login) that
+  // happened while this request was in flight would be silently undone.
+  if (data && data.token && getToken() === token) setToken(data.token)
+}
+
+function keepAlive() {
+  const now = Date.now()
+  if (!getToken() || now - lastRefreshAt < REFRESH_AFTER) return
+  lastRefreshAt = now
+  // Network hiccup -> allow an immediate retry on the next call; a 401 is
+  // handled inside refreshSession and must NOT retry in a loop.
+  refreshSession().catch(() => { lastRefreshAt = 0 })
+}
+
 async function request(path, options = {}) {
+  keepAlive()
   const headers = { ...(options.headers || {}) }
   if (!(options.body instanceof FormData)) {
     headers['Content-Type'] = headers['Content-Type'] || 'application/json'

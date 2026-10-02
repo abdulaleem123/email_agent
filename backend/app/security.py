@@ -106,6 +106,7 @@
 
 """JWT auth + email OTP. Single admin account (no public registration).
 Brute-force lockout, bcrypt hashing, short-lived tokens."""
+import calendar
 import hashlib
 import secrets
 from datetime import datetime, timedelta
@@ -124,6 +125,27 @@ LOCKOUT_MINUTES = 15
 COOKIE_NAME = "cv_session"
 
 
+# ---------------------------------------------------------------- session life
+def idle_delta() -> timedelta:
+    """How long a session may sit untouched before it expires."""
+    return timedelta(minutes=max(1, int(settings.SESSION_IDLE_MINUTES)))
+
+
+def absolute_delta() -> timedelta:
+    """Hard cap on ONE login, activity or not."""
+    return timedelta(hours=max(1, int(settings.JWT_EXPIRE_HOURS)))
+
+
+def idle_seconds() -> int:
+    return int(idle_delta().total_seconds())
+
+
+def _ts(dt: datetime) -> int:
+    """Naive-UTC datetime -> unix seconds, exactly how PyJWT serialises its
+    own claims, so `abs` is on the same clock as `exp`."""
+    return calendar.timegm(dt.utctimetuple())
+
+
 def hash_password(p: str) -> str:
     # bcrypt has a 72-byte input limit; encode + truncate defensively
     return bcrypt.hashpw(p.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
@@ -136,36 +158,76 @@ def verify_password(p: str, h: str) -> bool:
         return False
 
 
-def make_token(user: models.User) -> str:
+def make_token(user: models.User, abs_at: datetime | None = None) -> str:
+    """One token, two clocks.
+
+    exp — the IDLE window (SESSION_IDLE_MINUTES). The SPA slides it forward by
+        calling POST /api/auth/refresh while the user is actually working, so a
+        live session never interrupts anyone; stop working for an hour and the
+        token dies on its own.
+    abs — the ABSOLUTE deadline of this login (JWT_EXPIRE_HOURS from sign-in).
+        Refreshing copies it into the new token untouched, so one login can
+        never outlive its cap no matter how active the user is.
+
+    A token issued before `abs` existed simply falls back to its own `exp`,
+    which was the old 12-hour clock — still valid, still expires."""
+    now = datetime.utcnow()
+    if abs_at is None:
+        abs_at = now + absolute_delta()
+    exp_at = min(now + idle_delta(), abs_at)
     payload = {
         "sub": str(user.id),
         "email": user.email,
-        "exp": datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS),
-        "iat": datetime.utcnow(),
+        "iat": now,
+        "nbf": now,
+        "exp": exp_at,
+        "abs": _ts(abs_at),
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm="HS256")
 
 
-def current_user(authorization: str = Header(default=""),
-                 cv_session: str = Cookie(default=""),
-                 db: Session = Depends(get_db)) -> models.User:
-    """Accepts EITHER an httpOnly session cookie (set automatically by the
-    browser after login — safe from XSS since JS can't read it) OR the
-    classic 'Authorization: Bearer <token>' header (still supported for
-    scripts/API clients). Cookie is checked first."""
-    token = ""
-    if cv_session:
-        token = cv_session
-    elif authorization.startswith("Bearer "):
-        token = authorization.split(" ", 1)[1]
-    if not token:
-        raise HTTPException(401, "Not signed in")
+def pick_token(authorization: str = "", cv_session: str = "") -> str:
+    """Bearer first — the SPA always holds the freshest token in
+    localStorage, and a browser cookie can lag one refresh behind it. The
+    cookie is the fallback for clients that authenticate with it alone."""
+    if authorization.startswith("Bearer "):
+        return authorization.split(" ", 1)[1]
+    return cv_session or ""
+
+
+def decode_token(token: str) -> dict:
+    """Verify signature + BOTH clocks. Raises 401 with a message that is safe
+    to show the user verbatim."""
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
     except jwt.ExpiredSignatureError:
         raise HTTPException(401, "Session expired — sign in again")
     except Exception:
         raise HTTPException(401, "Invalid token")
+    abs_ts = payload.get("abs")
+    if isinstance(abs_ts, (int, float)) and _ts(datetime.utcnow()) >= abs_ts:
+        raise HTTPException(401, "Session expired — sign in again")
+    return payload
+
+
+def abs_deadline(payload: dict) -> datetime | None:
+    """The absolute deadline carried by a token, if it has one."""
+    abs_ts = payload.get("abs")
+    if isinstance(abs_ts, (int, float)) and abs_ts > 0:
+        return datetime.utcfromtimestamp(abs_ts)
+    return None
+
+
+def current_user(authorization: str = Header(default=""),
+                 cv_session: str = Cookie(default=""),
+                 db: Session = Depends(get_db)) -> models.User:
+    """Accepts EITHER the Bearer header (what the SPA sends) OR the httpOnly
+    session cookie. Both carry the same token, both are checked against the
+    idle clock and the absolute deadline in `decode_token`."""
+    token = pick_token(authorization, cv_session)
+    if not token:
+        raise HTTPException(401, "Not signed in")
+    payload = decode_token(token)
     user = db.get(models.User, int(payload["sub"]))
     if not user:
         raise HTTPException(401, "User not found")

@@ -166,8 +166,10 @@ class Campaign(Base):
     first_email_length = Column(String(20), default="")
     # Offer a live realtime demo in the first email instead of a brochure.
     demo_offer = Column(Boolean, default=True)
-    # Subject-line rules: short, specific, never ad-like.
-    subject_max_words = Column(Integer, default=4)
+    # Subject-line rules: exactly 3 words, specific, never ad-like. Whatever
+    # is stored here, subjects.subject_word_cap() clamps it to the house
+    # ceiling of 3 at send time.
+    subject_max_words = Column(Integer, default=3)
     industry = Column(String(120), default="")           # target industry
     email_length = Column(String(20), default="concise") # short|concise|long|professional
     what_to_sell = Column(Text, default="")              # products/services to pitch

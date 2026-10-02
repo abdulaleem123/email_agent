@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str = "admin@chatversio.ai"
     ADMIN_PASSWORD: str = "change-me-now"      # hashed on first boot
     JWT_SECRET: str = "generate-a-long-random-string"
+    # ── Session lifetime, two clocks ──────────────────────────────────────────
+    # SESSION_IDLE_MINUTES — how long a login may sit IDLE (no activity) before
+    #   it dies. The browser slides this forward while you are working, so an
+    #   active session keeps going; walk away for an hour and you are signed out.
+    # JWT_EXPIRE_HOURS — ABSOLUTE cap. From the moment of login, no amount of
+    #   activity keeps it alive past this. Refreshing never moves it.
+    SESSION_IDLE_MINUTES: int = 60
     JWT_EXPIRE_HOURS: int = 12
     OTP_ENABLED: bool = True                   # email OTP on every login
     OTP_EXPIRE_MINUTES: int = 10
