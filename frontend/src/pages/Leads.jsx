@@ -81,17 +81,16 @@ export default function Leads() {
       setData(d); setStats(s); setCampaigns(cs); setAgents(ag)
       if (st) setBatchSize(+(st.email_batch_size || 0))
       if (cs.length && !campaignId) setCampaignId(String(cs[0].id))
+      // Files that still have leads — drops a name the moment its last lead
+      // is deleted, and unsticks a filter that points at a vanished file.
+      if (Array.isArray(d?.source_files)) {
+        setSourceFiles(d.source_files)
+        if (sourceFile && !d.source_files.includes(sourceFile)) setSourceFile('')
+      }
     } catch (e) { show(e.message, true) }
   }, [page, status, debouncedQ, campaignId, agentId, unassignedOnly, unverifiedOnly, humanOnly, sourceFile, batchFilter, show])
  
   useEffect(() => { load() }, [load])
-
-  // The Excel files that have batches, for the "one sheet at a time" filter.
-  useEffect(() => {
-    api.mailRecordBatches({ limit: 200 })
-      .then(d => setSourceFiles(d?.source_files || []))
-      .catch(() => {})
-  }, [data.total, imp.job?.status])
  
   const upload = async (e) => {
     const file = e.target.files[0]
@@ -535,26 +534,30 @@ export default function Leads() {
                     <td>{l.country || '—'}</td>
                     <td>
                       {l.agent_name
-                        ? <div className="sm">{l.status === 'enrolled'
+                        ? <div className="sm">{['enrolled', 'contacted'].includes(l.status)
                             ? <span>✅ enrolled with <b>{l.agent_name}</b></span>
-                            : <span><b>{l.agent_name}</b> currently</span>}</div>
+                            : l.agent_active !== false
+                              ? <span><b>{l.agent_name}</b> currently</span>
+                              : <span className="mut"><b>{l.agent_name}</b> (paused)</span>}</div>
                         : <span className="mut sm">unassigned</span>}
                       {l.locked_until && (
                         <div className="sm mut" title="Another agent already emailed this lead today — it unlocks then">
                           🔒 next available {new Date(l.locked_until + 'Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                         </div>
                       )}
-                        {['new', 'enrolled', 'contacted'].includes(l.status) && (
+                        {l.status === 'new' && (
                         <div className="row" style={{ gap: 4, marginTop: 4 }}>
                           <select style={{ width: 110, padding: '4px 6px', fontSize: 12 }}
                                   value={rowAgentSel[l.id] ?? ''}
                                   onChange={e => setRowAgentSel(s => ({ ...s, [l.id]: e.target.value }))}>
                             <option value="">Pick agent…</option>
                             {agents
+                              .filter(a => a.is_active !== false)
                               .filter(a => !l.locked_until || a.name === l.agent_name)
                               .map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                           </select>
                           <button className="btn ghost small" disabled={!rowAgentSel[l.id]}
+                                  title="Enroll this lead with the picked agent"
                                   onClick={() => enrollOneWithAgent(l, rowAgentSel[l.id])}>
                             Enroll
                           </button>

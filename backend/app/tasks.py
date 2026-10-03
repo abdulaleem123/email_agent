@@ -347,7 +347,7 @@ def _subject_for_lead(lead, campaign, agent, *, llm_subject: str = "", **kwargs)
     First choice is the subject the model wrote alongside the body — it was
     drafted from the same content, so it names the actual topic instead of a
     generic line. It only gets to pick the WORDS: `subjects.fit_llm_subject`
-    forces the house format on it (3 words, 4 the hard max, Title Case, no
+    forces the house format on it (3 words, 4 the hard max, sentence case, no
     Re:/Fwd:, no banned opener, no AI/marketing fluff) and drops it when
     nothing usable is left.
 
@@ -369,6 +369,12 @@ def _subject_for_lead(lead, campaign, agent, *, llm_subject: str = "", **kwargs)
         if cand:
             subject = cand
     if not subject:
+        # Second choice: a topic line from the DuckDuckGo research / pain
+        # points — the subject still names what the search found about THIS
+        # company instead of jumping straight to the generic bank.
+        subject = subject_service.research_subject(lead, max_words=cap,
+                                                   taken=taken)
+    if not subject:
         subject = subject_service.build_subject(lead, campaign, **kwargs)
     phrases = playbook.avoid_phrases(agent)
     for _ in range(5):
@@ -380,13 +386,29 @@ def _subject_for_lead(lead, campaign, agent, *, llm_subject: str = "", **kwargs)
             break
         subject = nxt
     subject = playbook.scrub(subject, agent) or subject
-    if campaign is not None:
-        # 3 words (4 max) whenever the Subject part of the selection box is
-        # on; otherwise the campaign's own configured limit still applies.
-        # _normalise answers "" when the line starts on a banned opener — an
-        # empty subject would be sent as-is, so fall back to the bank instead.
-        subject = (subject_service._normalise(subject, max(1, _subject_word_cap(campaign)))
-                   or subject_service.build_subject(lead, campaign, **kwargs))
+    # FINAL HOUSE FORMAT — a COMPLETE 3–4 word line, sentence case, and never a
+    # "?" or "!": a 1–2 word fragment reads unfinished, and an interrogative
+    # subject reads like a cold-sales tease. The ceiling is 3 or 4 (the
+    # campaign's own cap, kept inside the 3–4 window), so nothing longer
+    # survives either.
+    ceiling = 4 if campaign is None else max(3, min(4, _subject_word_cap(campaign)))
+    subject = subject.replace("?", "").replace("!", "").strip()
+    subject = subject_service._normalise(subject, ceiling) or subject
+    tries = 0
+    while len(subject.split()) < 3 and tries < 6:
+        tries += 1
+        used = ({str(s).lower() for s in (kwargs.get("used") or [])}
+                | set(subject_service._used_subjects(lead))
+                | {subject.lower()})
+        nxt = (subject_service.research_subject(lead, max_words=4, taken=used)
+               or subject_service.build_subject(lead, campaign, used=used,
+                                                **{k: v for k, v in kwargs.items()
+                                                   if k != "used"}))
+        if not nxt or nxt == subject:
+            break
+        subject = nxt
+    subject = subject_service._normalise(subject, ceiling) or subject
+    subject = subject.replace("?", "").replace("!", "").strip()
     return subject
 
 
@@ -838,7 +860,7 @@ def start_campaign_lead(self, lead_id: int):
             offer_demo=bool(campaign.demo_offer) if campaign else True)
         # The subject is written FROM this email (the model drafts it with the
         # body), then hard-fitted to the house rule: 3 words (4 the hard max),
-        # Title Case, aimed at this lead's country/region and this campaign's
+        # sentence case, aimed at this lead's country/region and this campaign's
         # angle, never a line this lead already received, and never a phrase
         # from the agent's Avoid Phrases list. Anything unusable falls back to
         # the code-owned bank, so a bad model subject can never go out.
@@ -1185,7 +1207,7 @@ def send_followup(self, lead_id: int):
             strategy=campaign.strategy if campaign else "B2B",
             use_template=False, campaign=campaign,
             use_thread_memory=bool(campaign.followup_memory) if campaign else True)
-        # 3 words (4 max), Title Case, about THIS email, never a subject this
+        # 3 words (4 max), sentence case, about THIS email, never a subject this
         # lead already got, and never one from the Avoid Phrases list — a
         # repeated or banned subject line is the loudest "automated sequence"
         # signal.

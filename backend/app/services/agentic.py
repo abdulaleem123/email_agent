@@ -171,11 +171,14 @@ def generate_reply_agentic(db: Session, lead: models.Lead,
         first, _, rest = final_text.partition("\n")
         subject = first.split(":", 1)[1].strip()[:200]
         body = rest.strip()
-    from .llm import _humanize, strip_pricing_talk, has_pricing_talk, apply_cta
+    from .llm import _humanize, strip_pricing_talk, has_pricing_talk, apply_cta, _greeting_first_name, _soften_pain_talk
     from . import playbook, agent_settings
     # Same hard guarantees as outbound: no URLs / our address, no banned phrase.
     subject = playbook.scrub(_humanize(subject), agent)
     body = playbook.scrub(_humanize(body), agent)
+    # GREETING — first name only, no "pain point" talk. Same as outbound.
+    body = _greeting_first_name(body, lead)
+    subject, body = _soften_pain_talk(subject), _soften_pain_talk(body)
     # NO PRICING TALK — never answered, never written, campaign or not.
     if (campaign is not None and agent_settings.is_on(campaign, "no_pricing")
             and getattr(campaign, "no_pricing", True)):

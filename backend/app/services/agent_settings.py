@@ -147,8 +147,8 @@ PARTS: list[dict] = [
         label="Subject (optional)",
         desc="Optional UI instruction; keep subjects to 3 words (4 maximum).",
         rule=(
-            "SUBJECT — optional instruction, 3 WORDS, HARD MAX 4. Title Case "
-            "(every word starts with a capital letter), short, specific, "
+            "SUBJECT — optional instruction, 3 WORDS, HARD MAX 4. Sentence "
+            "case (first word capital, the rest lowercase), short, specific, "
             "peer-to-peer, professional and strong in this industry's own "
             "words, and about the operational reality you wrote about in this "
             "very email — grounded in what research showed about their "

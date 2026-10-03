@@ -131,7 +131,9 @@ def list_leads_paged(status: str | None = Query(default=None),
                         .filter(models.Lead.email.in_(page_emails),
                                 models.Lead.source != "pitch").all()}
 
-    agent_names = {a.id: a.name for a in db.query(models.Agent.id, models.Agent.name).all()}
+    agent_info = {a.id: (a.name, bool(a.is_active))
+                  for a in db.query(models.Agent.id, models.Agent.name,
+                                    models.Agent.is_active).all()}
 
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     page_ids = [l.id for l in rows]
@@ -151,16 +153,31 @@ def list_leads_paged(status: str | None = Query(default=None),
     items = []
     for l in rows:
         d = schemas.LeadOut.model_validate(l, from_attributes=True).model_dump()
-        d["agent_name"] = agent_names.get(l.agent_id, "")
+        d["agent_name"], d["agent_active"] = agent_info.get(l.agent_id, ("", True))
         d["dup_in_excel"] = pitch_pending and l.email in dup_in_excel
         senders_today = sent_today_by.get(l.id, set())
         if senders_today and (senders_today - {l.agent_id}):
             d["locked_until"] = unlock_at
         items.append(d)
+
+    # The Excel files that STILL have leads. Derived from live lead rows (not
+    # Batch history), so when the last lead of a file is deleted the name
+    # disappears from the "one sheet at a time" filter on the next load.
+    tag_files = [f for (f,) in db.query(models.Lead.upload_tag)
+                 .filter(models.Lead.upload_tag != "").distinct().all()]
+    batch_files = [f for (f,) in
+                   (db.query(models.Batch.source_filename)
+                    .join(models.Lead, models.Lead.batch_id == models.Batch.id)
+                    .filter(models.Batch.source_filename != "")
+                    .distinct().all())]
+    source_files = sorted({(f or "").strip() for f in tag_files + batch_files}
+                          - {""})
+
     return {
         "page": page, "per_page": per_page, "total": total,
         "pages": (total + per_page - 1) // per_page,
         "items": items,
+        "source_files": source_files,
     }
 
 

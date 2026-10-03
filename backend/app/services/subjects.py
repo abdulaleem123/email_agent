@@ -12,9 +12,10 @@ Rules the whole product agreed on, enforced in code rather than in a prompt:
   what the campaign sells — never a hook, a tease or a casual aside
   ("Worth A Look", "Something We Noticed"), and never AI/marketing fluff
   (unlock, boost, seamless, revolutionary).
-- Title Case: the first letter of EVERY word uppercase, the rest of the word
-  left alone. No ALL CAPS (spam filters read it as shouting), no run-on
-  sentence case.
+- Sentence case: the FIRST word capitalised, every other word lowercase — the
+  house look for subjects ("Customer inquiries unanswered"). Short ALL-CAPS
+  acronyms (AI, CRM, B2B) stay as they are. No full ALL CAPS (spam filters
+  read it as shouting), no run-on sentence case, no Title Case.
 - No exclamation marks, no "Re:", no banned openers (Noticing / I noticed /
   I see / Checking in / Quick question / Following up / Just checking /
   Opportunity / Hope you're).
@@ -226,6 +227,8 @@ _AI_FLUFF = {
     "optimize", "optimise", "innovative", "cuttingedge", "turbocharge",
     "dominate", "effortless", "effortlessly", "gamechanger", "nextlevel",
     "magic", "leverage", "worldclass", "bestinclass",
+    # product language: a subject never says "pain" — it names the topic
+    "pain", "pains", "painpoint", "painpoints",
 }
 
 
@@ -245,10 +248,10 @@ def _normalise(raw: str, max_words: int) -> str:
     chopping the first word off, which turned "Quick check" into "Check" and
     "Following up on this" into "Up on" — worse than no subject at all.
 
-    Guarantees: <= max_words words, Title Case (first letter of every word
-    uppercase, ALL-CAPS words like "AI" left alone), no "Re:"/"Fwd:", no
-    exclamation or question marks, never starts on a banned opener, and never
-    contains AI/marketing fluff."""
+    Guarantees: <= max_words words, SENTENCE CASE (first word capitalised,
+    every other word lowercase, short ALL-CAPS acronyms like "AI" left alone),
+    no "Re:"/"Fwd:", no exclamation or question marks, never starts on a
+    banned opener, and never contains AI/marketing fluff."""
     s = re.sub(r"\s+", " ", (raw or "").strip())
     # Strip every leading Re:/Fwd: prefix, not just the first one — a chained
     # "Re: Fwd: Re: Quick question" is common in forwarded threads.
@@ -270,9 +273,20 @@ def _normalise(raw: str, max_words: int) -> str:
         return ""          # unusable, not repairable — try the next candidate
     if _fluff_hit(words):
         return ""          # reads like an ad — try the next candidate
-    # Title Case: first letter of every word uppercase, rest left as written.
-    return " ".join(w[:1].upper() + w[1:] if not (w.isupper() and len(w) <= 4)
-                    else w for w in words)
+    # SENTENCE CASE — first word capitalised, everything else lowercase;
+    # short ALL-CAPS acronyms (AI, CRM, B2B) are left alone.
+    _ACRONYMS = {"ai", "crm", "b2b", "b2c", "saas", "seo", "ppc", "kpi",
+                 "api", "faq", "cv", "ux", "ui", "erp", "iot"}
+
+    def _case(w: str, first: bool) -> str:
+        if w.isupper() and 2 <= len(w) <= 4:
+            return w
+        if w.lower().strip("'-") in _ACRONYMS:
+            return w.upper()
+        if first:
+            return w[:1].upper() + w[1:].lower()
+        return w.lower()
+    return " ".join(_case(w, i == 0) for i, w in enumerate(words))
 
 
 
@@ -296,6 +310,13 @@ _WEAK_WORDS = {
     "do", "does", "did", "will", "would", "can", "could", "should",
     "your", "their", "our", "my", "you", "we", "i", "he", "she", "they",
     "from", "by", "into", "about", "per", "after", "before", "without",
+    # light verbs and glue words that carry no topic on their own — dropped
+    # when a research line is cut down to a subject ("support inquiries GO
+    # unanswered" must not become "Support Inquiries Go")
+    "go", "goes", "going", "come", "comes", "coming", "make", "makes",
+    "keep", "keeps", "take", "takes", "get", "gets", "become", "becomes",
+    "need", "needs", "want", "wants", "still", "also", "very", "really",
+    "often", "how", "why", "what", "where", "who", "which",
 }
 
 
@@ -384,8 +405,9 @@ def fit_llm_subject(raw: str, *, max_words: int = MAX_WORDS, lead=None,
       company/person/domain tokens come out first, then duplicates, then weak
       words; if the line still runs over, it is rejected rather than chopped
       mid-phrase,
-    * Title Case — an ALL CAPS line reads as shouting and trips spam filters,
-      so it is lowered before anything else and then capitalised word by word,
+    * sentence case — an ALL CAPS line reads as shouting and trips spam
+      filters, so it is lowered before anything else; only the first word
+      comes back capitalised,
     * no Re:/Fwd:, no punctuation, no banned opener, no AI/marketing fluff,
       never a repeat.
 
@@ -423,6 +445,38 @@ def fit_llm_subject(raw: str, *, max_words: int = MAX_WORDS, lead=None,
     if taken and out.lower() in {t.lower() for t in taken}:
         return ""
     return out
+
+
+def research_subject(lead, *, max_words: int = MAX_WORDS,
+                     taken: set[str] | None = None) -> str:
+    """A topic line pulled from THIS lead's research — pain points first,
+    DuckDuckGo notes second.
+
+    The model's own subject is tried before this and the generic bank after
+    this: the research is the whole reason a specific line can be written at
+    all, so its words get first shot at the fallback. Everything still runs
+    through `_normalise`, so the house format (word cap, sentence case, no banned
+    opener, no fluff) holds — returns "" when nothing usable is left and the
+    caller moves on to the bank."""
+    taken = {t.lower() for t in (taken or set())}
+    drop = _lead_tokens(lead)
+    blobs = [getattr(lead, "pain_points", "") or "",
+             getattr(lead, "company_research", "") or ""]
+    for blob in blobs:
+        # Pain points arrive as bullet lines, research as prose — split both
+        # into clauses and try the head content words of each as a candidate.
+        lines = [ln.strip(" -*•\t") for ln in re.split(r"[\n;.]+", blob)
+                 if ln and ln.strip()]
+        for line in lines:
+            content = [w for w in line.split()
+                       if _bare(w) not in _WEAK_WORDS
+                       and not _is_lead_word(w, drop)]
+            if len(content) < 2:
+                continue
+            cand = _normalise(" ".join(content[:max_words]), max_words)
+            if cand and cand.lower() not in taken:
+                return cand
+    return ""
 
 
 def build_subject(lead, campaign=None, *, followup_number: int = 0,

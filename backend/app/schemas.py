@@ -281,6 +281,7 @@ class LeadOut(BaseModel):
     last_inbound_at: Optional[datetime]
     agent_id: Optional[int]
     agent_name: str = ""
+    agent_active: bool = True              # is the owning agent live right now
     locked_until: Optional[datetime] = None   # if another agent emailed this lead today
     campaign_id: Optional[int]
     batch_id: Optional[int]
